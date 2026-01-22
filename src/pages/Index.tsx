@@ -1,20 +1,30 @@
 import { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Wand2, AlertTriangle, Loader2 } from 'lucide-react';
-import { Header } from '@/components/Header';
-import { VideoDropzone } from '@/components/VideoDropzone';
-import { VideoPreview } from '@/components/VideoPreview';
-import { CutConfiguration } from '@/components/CutConfiguration';
-import { ProcessingStatus } from '@/components/ProcessingStatus';
-import { ClipsList } from '@/components/ClipsList';
-import { useFFmpeg } from '@/hooks/useFFmpeg';
+import { Wand2, Loader2, AlertTriangle, Zap } from 'lucide-react';
+import { ViralCutterHeader } from '@/components/ViralCutterHeader';
+import { UploadZone } from '@/components/UploadZone';
+import { VideoPreviewEnhanced } from '@/components/VideoPreviewEnhanced';
+import { ViralConfigPanel } from '@/components/ViralConfigPanel';
+import { ProcessingOverlay } from '@/components/ProcessingOverlay';
+import { ViralClipsGrid } from '@/components/ViralClipsGrid';
+import { useFFmpegWorker, CutConfig } from '@/hooks/useFFmpegWorker';
 import { Button } from '@/components/ui/button';
+
+const DEFAULT_CONFIG: CutConfig = {
+  duration: 30,
+  count: 3,
+  speed: 1.05,
+  zoomIntensity: 50,
+  enableCaptions: true,
+  captionStyle: 'hook',
+  customCaption: '',
+};
 
 const Index = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [videoDuration, setVideoDuration] = useState(0);
-  const [cutDuration, setCutDuration] = useState(30);
-  const [cutCount, setCutCount] = useState(3);
+  const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
+  const [config, setConfig] = useState<CutConfig>(DEFAULT_CONFIG);
   const [error, setError] = useState<string | null>(null);
 
   const {
@@ -25,8 +35,9 @@ const Index = () => {
     progress,
     clips,
     processVideo,
+    abort,
     reset,
-  } = useFFmpeg();
+  } = useFFmpegWorker();
 
   const handleFileSelect = useCallback((file: File) => {
     setSelectedFile(file);
@@ -37,18 +48,26 @@ const Index = () => {
   const handleClearFile = useCallback(() => {
     setSelectedFile(null);
     setVideoDuration(0);
+    setVideoDimensions({ width: 0, height: 0 });
     setError(null);
     reset();
   }, [reset]);
 
   const handleDurationChange = useCallback((duration: number) => {
     setVideoDuration(duration);
-    // Adjust cut count if needed
-    const maxClips = Math.floor(duration / cutDuration);
-    if (cutCount > maxClips) {
-      setCutCount(Math.max(1, maxClips));
+    const maxClips = Math.floor(duration / config.duration);
+    if (config.count > maxClips) {
+      setConfig(prev => ({ ...prev, count: Math.max(1, maxClips) }));
     }
-  }, [cutDuration, cutCount]);
+  }, [config.duration, config.count]);
+
+  const handleDimensionsChange = useCallback((width: number, height: number) => {
+    setVideoDimensions({ width, height });
+  }, []);
+
+  const handleConfigChange = useCallback((updates: Partial<CutConfig>) => {
+    setConfig(prev => ({ ...prev, ...updates }));
+  }, []);
 
   const handleProcess = async () => {
     if (!selectedFile) return;
@@ -60,33 +79,52 @@ const Index = () => {
         await loadFFmpeg();
       }
 
-      await processVideo(selectedFile, {
-        duration: cutDuration,
-        count: cutCount,
-      }, videoDuration);
+      await processVideo(selectedFile, config, videoDuration);
     } catch (err) {
       console.error('Processing error:', err);
-      setError('Erro ao processar o vídeo. Tente novamente.');
+      setError('Erro ao processar o vídeo. Verifique o console para mais detalhes.');
     }
   };
 
-  const canProcess = selectedFile && videoDuration > 0 && cutDuration <= videoDuration && !processing;
+  const canProcess = selectedFile && videoDuration > 0 && config.duration <= videoDuration && !processing;
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Background effects */}
+      {/* Animated background */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-0 left-1/4 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-accent/10 rounded-full blur-3xl" />
+        <motion.div
+          animate={{
+            x: [0, 100, 0],
+            y: [0, 50, 0],
+          }}
+          transition={{ duration: 20, repeat: Infinity, ease: 'linear' }}
+          className="absolute top-0 left-1/4 w-[600px] h-[600px] bg-primary/8 rounded-full blur-3xl"
+        />
+        <motion.div
+          animate={{
+            x: [0, -100, 0],
+            y: [0, -50, 0],
+          }}
+          transition={{ duration: 25, repeat: Infinity, ease: 'linear' }}
+          className="absolute bottom-0 right-1/4 w-[500px] h-[500px] bg-accent/8 rounded-full blur-3xl"
+        />
+        <motion.div
+          animate={{
+            scale: [1, 1.2, 1],
+          }}
+          transition={{ duration: 15, repeat: Infinity, ease: 'easeInOut' }}
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-gradient-radial from-primary/5 to-transparent rounded-full"
+        />
       </div>
 
-      <div className="relative max-w-6xl mx-auto px-4 pb-16">
-        <Header />
+      <div className="relative max-w-7xl mx-auto px-4 pb-20">
+        <ViralCutterHeader />
 
-        <div className="grid gap-8 lg:grid-cols-2">
-          {/* Left column - Upload and Preview */}
-          <div className="space-y-6">
-            <VideoDropzone
+        {/* Main content grid */}
+        <div className="grid gap-8 lg:grid-cols-5">
+          {/* Left column - Upload and Preview (3 cols) */}
+          <div className="lg:col-span-3 space-y-6">
+            <UploadZone
               onFileSelect={handleFileSelect}
               selectedFile={selectedFile}
               onClear={handleClearFile}
@@ -94,58 +132,77 @@ const Index = () => {
 
             <AnimatePresence mode="wait">
               {selectedFile && (
-                <VideoPreview
+                <VideoPreviewEnhanced
                   key="preview"
                   file={selectedFile}
                   onDurationChange={handleDurationChange}
+                  onDimensionsChange={handleDimensionsChange}
                 />
               )}
             </AnimatePresence>
+
+            {/* Processing overlay - show in left column when processing */}
+            {(processing || progress.stage === 'complete' || progress.stage === 'error') && (
+              <ProcessingOverlay
+                progress={progress}
+                isProcessing={processing}
+                onAbort={abort}
+              />
+            )}
           </div>
 
-          {/* Right column - Configuration and Processing */}
-          <div className="space-y-6">
+          {/* Right column - Configuration (2 cols) */}
+          <div className="lg:col-span-2 space-y-6">
             <AnimatePresence mode="wait">
               {selectedFile && videoDuration > 0 && (
                 <>
-                  <CutConfiguration
+                  <ViralConfigPanel
                     key="config"
-                    duration={cutDuration}
-                    count={cutCount}
+                    config={config}
                     maxDuration={videoDuration}
-                    onDurationChange={setCutDuration}
-                    onCountChange={setCutCount}
+                    onConfigChange={handleConfigChange}
                   />
 
                   {/* Process button */}
                   <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.2 }}
+                    transition={{ delay: 0.3 }}
                   >
                     <Button
                       onClick={handleProcess}
                       disabled={!canProcess || ffmpegLoading}
                       size="lg"
-                      className="w-full gap-3 h-14 text-lg font-semibold glow-primary disabled:opacity-50 disabled:glow-none"
+                      className="w-full gap-3 h-16 text-lg font-bold relative overflow-hidden group"
                     >
-                      {ffmpegLoading ? (
-                        <>
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          Carregando FFmpeg...
-                        </>
-                      ) : processing ? (
-                        <>
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          Processando...
-                        </>
-                      ) : (
-                        <>
-                          <Wand2 className="w-5 h-5" />
-                          Gerar {cutCount} Corte{cutCount > 1 ? 's' : ''}
-                        </>
-                      )}
+                      {/* Animated gradient background */}
+                      <div className="absolute inset-0 bg-gradient-to-r from-primary via-accent to-primary bg-[length:200%_100%] group-hover:animate-shimmer opacity-0 group-hover:opacity-100 transition-opacity" />
+                      
+                      <span className="relative flex items-center gap-3">
+                        {ffmpegLoading ? (
+                          <>
+                            <Loader2 className="w-6 h-6 animate-spin" />
+                            Carregando Engine...
+                          </>
+                        ) : processing ? (
+                          <>
+                            <Loader2 className="w-6 h-6 animate-spin" />
+                            Processando...
+                          </>
+                        ) : (
+                          <>
+                            <Zap className="w-6 h-6" />
+                            Gerar {config.count} Corte{config.count > 1 ? 's' : ''} Virais
+                          </>
+                        )}
+                      </span>
                     </Button>
+
+                    {!ffmpegLoaded && !ffmpegLoading && (
+                      <p className="text-center text-xs text-muted-foreground mt-2">
+                        Primeira execução carrega o motor FFmpeg (~31MB)
+                      </p>
+                    )}
                   </motion.div>
 
                   {/* Error message */}
@@ -155,27 +212,22 @@ const Index = () => {
                         initial={{ opacity: 0, y: -10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="p-4 rounded-lg bg-destructive/10 border border-destructive/20 flex items-center gap-3"
+                        className="p-4 rounded-xl bg-destructive/10 border border-destructive/20 flex items-center gap-3"
                       >
-                        <AlertTriangle className="w-5 h-5 text-destructive" />
+                        <AlertTriangle className="w-5 h-5 text-destructive shrink-0" />
                         <p className="text-sm text-destructive">{error}</p>
                       </motion.div>
                     )}
                   </AnimatePresence>
-
-                  {/* Processing status */}
-                  {(processing || progress.status === 'Concluído!') && (
-                    <ProcessingStatus progress={progress} isProcessing={processing} />
-                  )}
                 </>
               )}
             </AnimatePresence>
           </div>
         </div>
 
-        {/* Clips list */}
+        {/* Clips grid - full width */}
         <div className="mt-12">
-          <ClipsList clips={clips} />
+          <ViralClipsGrid clips={clips} />
         </div>
       </div>
     </div>
