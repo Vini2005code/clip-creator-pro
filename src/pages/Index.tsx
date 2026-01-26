@@ -1,13 +1,15 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Wand2, Loader2, AlertTriangle, Zap } from 'lucide-react';
+import { Zap, Loader2, AlertTriangle } from 'lucide-react';
 import { ViralCutterHeader } from '@/components/ViralCutterHeader';
 import { UploadZone } from '@/components/UploadZone';
-import { VideoPreviewEnhanced } from '@/components/VideoPreviewEnhanced';
+import { VideoPreviewEnhanced, VideoPreviewEnhancedRef } from '@/components/VideoPreviewEnhanced';
 import { ViralConfigPanel } from '@/components/ViralConfigPanel';
 import { ProcessingOverlay } from '@/components/ProcessingOverlay';
 import { ViralClipsGrid } from '@/components/ViralClipsGrid';
+import { AudioAnalyzerPanel } from '@/components/AudioAnalyzerPanel';
 import { useFFmpegWorker, CutConfig } from '@/hooks/useFFmpegWorker';
+import { useAudioAnalyzer } from '@/hooks/useAudioAnalyzer';
 import { Button } from '@/components/ui/button';
 
 const DEFAULT_CONFIG: CutConfig = {
@@ -26,6 +28,7 @@ const Index = () => {
   const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
   const [config, setConfig] = useState<CutConfig>(DEFAULT_CONFIG);
   const [error, setError] = useState<string | null>(null);
+  const videoPreviewRef = useRef<VideoPreviewEnhancedRef>(null);
 
   const {
     load: loadFFmpeg,
@@ -39,11 +42,21 @@ const Index = () => {
     reset,
   } = useFFmpegWorker();
 
+  const audioAnalyzer = useAudioAnalyzer({
+    minPeakDistance: config.duration * 0.8, // Avoid overlapping clips
+    numPeaks: 10,
+    clipDuration: config.duration,
+  });
+
   const handleFileSelect = useCallback((file: File) => {
+    console.log('[Index] File selected:', file.name, file.size);
     setSelectedFile(file);
+    setVideoDuration(0); // Reset to force re-detection
+    setVideoDimensions({ width: 0, height: 0 });
     setError(null);
     reset();
-  }, [reset]);
+    audioAnalyzer.reset();
+  }, [reset, audioAnalyzer]);
 
   const handleClearFile = useCallback(() => {
     setSelectedFile(null);
@@ -51,22 +64,36 @@ const Index = () => {
     setVideoDimensions({ width: 0, height: 0 });
     setError(null);
     reset();
-  }, [reset]);
+    audioAnalyzer.reset();
+  }, [reset, audioAnalyzer]);
 
   const handleDurationChange = useCallback((duration: number) => {
+    console.log('[Index] Duration changed:', duration);
     setVideoDuration(duration);
+    // Adjust count if needed
     const maxClips = Math.floor(duration / config.duration);
-    if (config.count > maxClips) {
+    if (config.count > maxClips && maxClips > 0) {
       setConfig(prev => ({ ...prev, count: Math.max(1, maxClips) }));
     }
   }, [config.duration, config.count]);
 
   const handleDimensionsChange = useCallback((width: number, height: number) => {
+    console.log('[Index] Dimensions changed:', width, height);
     setVideoDimensions({ width, height });
   }, []);
 
   const handleConfigChange = useCallback((updates: Partial<CutConfig>) => {
     setConfig(prev => ({ ...prev, ...updates }));
+  }, []);
+
+  const handleAnalyzeAudio = useCallback(async () => {
+    if (!selectedFile) return;
+    await audioAnalyzer.analyzeAudio(selectedFile);
+  }, [selectedFile, audioAnalyzer]);
+
+  const handleApplySuggestions = useCallback((cuts: number[]) => {
+    // Use the number of detected cuts
+    setConfig(prev => ({ ...prev, count: cuts.length }));
   }, []);
 
   const handleProcess = async () => {
@@ -87,6 +114,7 @@ const Index = () => {
   };
 
   const canProcess = selectedFile && videoDuration > 0 && config.duration <= videoDuration && !processing;
+  const showConfig = selectedFile && videoDuration > 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -132,12 +160,19 @@ const Index = () => {
 
             <AnimatePresence mode="wait">
               {selectedFile && (
-                <VideoPreviewEnhanced
+                <motion.div
                   key="preview"
-                  file={selectedFile}
-                  onDurationChange={handleDurationChange}
-                  onDimensionsChange={handleDimensionsChange}
-                />
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                >
+                  <VideoPreviewEnhanced
+                    ref={videoPreviewRef}
+                    file={selectedFile}
+                    onDurationChange={handleDurationChange}
+                    onDimensionsChange={handleDimensionsChange}
+                  />
+                </motion.div>
               )}
             </AnimatePresence>
 
@@ -154,8 +189,19 @@ const Index = () => {
           {/* Right column - Configuration (2 cols) */}
           <div className="lg:col-span-2 space-y-6">
             <AnimatePresence mode="wait">
-              {selectedFile && videoDuration > 0 && (
+              {showConfig && (
                 <>
+                  {/* Audio Analyzer Panel */}
+                  <AudioAnalyzerPanel
+                    onAnalyze={handleAnalyzeAudio}
+                    analyzing={audioAnalyzer.analyzing}
+                    progress={audioAnalyzer.progress}
+                    result={audioAnalyzer.result}
+                    error={audioAnalyzer.error}
+                    onApplySuggestions={handleApplySuggestions}
+                    clipDuration={config.duration}
+                  />
+
                   <ViralConfigPanel
                     key="config"
                     config={config}
