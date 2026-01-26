@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
@@ -27,12 +27,17 @@ export type ProcessingStage =
   | 'loading-ffmpeg'
   | 'reading-file'
   | 'analyzing'
+  | 'cleaning-metadata'
+  | 'applying-crop'
+  | 'applying-zoom'
   | 'applying-filters'
+  | 'generating-hash'
   | 'adding-captions'
   | 'encoding'
   | 'finalizing'
   | 'complete'
-  | 'error';
+  | 'error'
+  | 'aborted';
 
 export interface ProcessingProgress {
   currentClip: number;
@@ -52,6 +57,24 @@ const HOOK_CAPTIONS = [
   "No one talks about this",
 ];
 
+const STAGE_MESSAGES: Record<ProcessingStage, string> = {
+  'idle': 'Pronto para processar',
+  'loading-ffmpeg': 'Carregando motor FFmpeg...',
+  'reading-file': 'Lendo arquivo de vídeo...',
+  'analyzing': 'Analisando dimensões...',
+  'cleaning-metadata': 'Limpando metadados...',
+  'applying-crop': 'Aplicando Smart Crop 9:16...',
+  'applying-zoom': 'Aplicando Zoom Dinâmico...',
+  'applying-filters': 'Aplicando filtros de cor...',
+  'generating-hash': 'Gerando hash único (grain)...',
+  'adding-captions': 'Adicionando legendas...',
+  'encoding': 'Codificando vídeo...',
+  'finalizing': 'Finalizando exportação...',
+  'complete': 'Processamento concluído!',
+  'error': 'Erro no processamento',
+  'aborted': 'Processamento cancelado',
+};
+
 export function useFFmpegWorker() {
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -62,37 +85,28 @@ export function useFFmpegWorker() {
     totalClips: 0,
     clipProgress: 0,
     stage: 'idle',
-    stageMessage: 'Pronto para processar',
+    stageMessage: STAGE_MESSAGES['idle'],
   });
   const [clips, setClips] = useState<ProcessedClip[]>([]);
-  const abortRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isAbortedRef = useRef(false);
 
   const updateProgress = useCallback((updates: Partial<ProcessingProgress>) => {
-    setProgress(prev => ({ ...prev, ...updates }));
+    setProgress(prev => {
+      const newProgress = { ...prev, ...updates };
+      if (updates.stage && !updates.stageMessage) {
+        newProgress.stageMessage = STAGE_MESSAGES[updates.stage] || updates.stage;
+      }
+      return newProgress;
+    });
   }, []);
-
-  const getStageMessage = (stage: ProcessingStage, clipNum?: number, total?: number): string => {
-    const messages: Record<ProcessingStage, string> = {
-      'idle': 'Pronto para processar',
-      'loading-ffmpeg': 'Carregando motor de vídeo...',
-      'reading-file': 'Lendo arquivo de vídeo...',
-      'analyzing': 'Analisando conteúdo...',
-      'applying-filters': `Aplicando filtros virais (${clipNum}/${total})...`,
-      'adding-captions': 'Adicionando legendas...',
-      'encoding': `Codificando corte ${clipNum}/${total}...`,
-      'finalizing': 'Finalizando exportação...',
-      'complete': 'Processamento concluído!',
-      'error': 'Erro no processamento',
-    };
-    return messages[stage];
-  };
 
   const load = useCallback(async () => {
     if (loaded || loading) return;
     
     setLoading(true);
-    updateProgress({ stage: 'loading-ffmpeg', stageMessage: getStageMessage('loading-ffmpeg') });
-    console.log('[FFmpeg Worker] Iniciando carregamento...');
+    updateProgress({ stage: 'loading-ffmpeg' });
+    console.log('[FFmpeg] Iniciando carregamento...');
     
     try {
       const ffmpeg = new FFmpeg();
@@ -115,10 +129,10 @@ export function useFFmpegWorker() {
       });
 
       setLoaded(true);
-      updateProgress({ stage: 'idle', stageMessage: getStageMessage('idle') });
-      console.log('[FFmpeg Worker] Carregado com sucesso!');
+      updateProgress({ stage: 'idle' });
+      console.log('[FFmpeg] Carregado com sucesso!');
     } catch (error) {
-      console.error('[FFmpeg Worker] Erro ao carregar:', error);
+      console.error('[FFmpeg] Erro ao carregar:', error);
       updateProgress({ stage: 'error', stageMessage: 'Falha ao carregar FFmpeg' });
       throw error;
     } finally {
@@ -127,11 +141,11 @@ export function useFFmpegWorker() {
   }, [loaded, loading, updateProgress]);
 
   const generateRandomColorGrade = () => {
-    // Random subtle variations for unique hash
-    const brightness = (Math.random() * 0.04 - 0.02).toFixed(3); // -0.02 to +0.02
-    const contrast = (1 + Math.random() * 0.06 - 0.03).toFixed(3); // 0.97 to 1.03
-    const saturation = (1 + Math.random() * 0.1 - 0.05).toFixed(3); // 0.95 to 1.05
-    const gamma = (1 + Math.random() * 0.04 - 0.02).toFixed(3); // 0.98 to 1.02
+    // Random subtle variations for unique hash per clip
+    const brightness = (Math.random() * 0.04 - 0.02).toFixed(4); // -0.02 to +0.02
+    const contrast = (1 + Math.random() * 0.06 - 0.03).toFixed(4); // 0.97 to 1.03
+    const saturation = (1 + Math.random() * 0.1 - 0.05).toFixed(4); // 0.95 to 1.05
+    const gamma = (1 + Math.random() * 0.04 - 0.02).toFixed(4); // 0.98 to 1.02
     return { brightness, contrast, saturation, gamma };
   };
 
@@ -154,12 +168,13 @@ export function useFFmpegWorker() {
     config: CutConfig,
     clipIndex: number,
     inputWidth: number,
-    inputHeight: number
+    inputHeight: number,
+    onStageChange: (stage: ProcessingStage) => void
   ): string => {
     const colorGrade = generateRandomColorGrade();
     const caption = getCaption(config, clipIndex);
     
-    // Calculate 9:16 dimensions
+    // Calculate perfect center crop for 9:16
     const targetRatio = 9 / 16;
     const inputRatio = inputWidth / inputHeight;
     
@@ -174,57 +189,81 @@ export function useFFmpegWorker() {
       cropH = Math.floor(inputWidth / targetRatio);
     }
 
-    // Ken Burns zoom parameters
-    const zoomStart = 1.0;
-    const zoomEnd = 1.0 + (config.zoomIntensity / 100) * 0.15; // Max 15% zoom
-    const panAmount = config.zoomIntensity * 0.5; // Subtle pan
+    // Ensure even dimensions for h264
+    cropW = cropW - (cropW % 2);
+    cropH = cropH - (cropH % 2);
 
     const filters: string[] = [];
 
-    // 1. Speed adjustment (atempo for audio, setpts for video)
+    // 1. Speed adjustment first (setpts for video)
     if (config.speed !== 1.0) {
       filters.push(`setpts=${(1/config.speed).toFixed(4)}*PTS`);
     }
 
-    // 2. Crop to center for 9:16
+    // 2. Smart Crop - perfectly centered for 9:16
+    onStageChange('applying-crop');
     filters.push(`crop=${cropW}:${cropH}:(in_w-${cropW})/2:(in_h-${cropH})/2`);
 
-    // 3. Scale to 1080x1920
+    // 3. Scale to final 1080x1920 (TikTok/Reels optimal)
     filters.push(`scale=1080:1920:flags=lanczos`);
 
-    // 4. Ken Burns Effect (zoom + pan)
+    // 4. Ken Burns Effect (zoom + subtle pan) - optimized to prevent stuttering
     if (config.zoomIntensity > 0) {
+      onStageChange('applying-zoom');
+      const zoomAmount = (config.zoomIntensity / 100) * 0.12; // Max 12% zoom
+      const fps = 30;
+      const totalFrames = config.duration * fps;
+      
+      // Smooth easing with sine interpolation to prevent stuttering
       filters.push(
-        `zoompan=z='${zoomStart}+${((zoomEnd - zoomStart) / (config.duration * 25)).toFixed(6)}*on':` +
-        `x='iw/2-(iw/zoom/2)+${panAmount}*sin(on/${config.duration * 25}*PI)':` +
+        `zoompan=z='1+${zoomAmount.toFixed(4)}*sin(on/${totalFrames}*PI*0.5)':` +
+        `x='iw/2-(iw/zoom/2)':` +
         `y='ih/2-(ih/zoom/2)':` +
-        `d=${config.duration * 25}:s=1080x1920:fps=25`
+        `d=1:s=1080x1920:fps=${fps}`
       );
     }
 
     // 5. Random color grading for unique hash
+    onStageChange('applying-filters');
     filters.push(
       `eq=brightness=${colorGrade.brightness}:contrast=${colorGrade.contrast}:` +
       `saturation=${colorGrade.saturation}:gamma=${colorGrade.gamma}`
     );
 
-    // 6. Digital grain (noise) for hash uniqueness
-    const grainSeed = Math.floor(Math.random() * 1000000);
-    filters.push(`noise=c0s=3:c0f=t+u:allf=t:seed=${grainSeed}`);
+    // 6. Digital grain (noise) for hash uniqueness - invisible but effective
+    onStageChange('generating-hash');
+    const grainSeed = Math.floor(Math.random() * 999999);
+    filters.push(`noise=c0s=2:c0f=t:allf=t:seed=${grainSeed}`);
 
-    // 7. Caption overlay
+    // 7. Caption overlay (if enabled)
     if (caption) {
-      const escapedCaption = caption.replace(/'/g, "'\\''").replace(/:/g, '\\:');
+      onStageChange('adding-captions');
+      // Escape special FFmpeg characters
+      const escapedCaption = caption
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "'\\''")
+        .replace(/:/g, '\\:')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]');
+      
       filters.push(
         `drawtext=text='${escapedCaption}':` +
-        `fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:` +
-        `fontsize=48:fontcolor=white:` +
-        `borderw=3:bordercolor=black:` +
-        `x=(w-text_w)/2:y=h*0.85`
+        `fontsize=56:fontcolor=white:` +
+        `borderw=4:bordercolor=black:` +
+        `x=(w-text_w)/2:y=h*0.82`
       );
     }
 
     return filters.join(',');
+  };
+
+  const cleanupFile = async (ffmpeg: FFmpeg, filename: string) => {
+    try {
+      await ffmpeg.deleteFile(filename);
+      console.log(`[FFmpeg] Arquivo ${filename} removido da memória`);
+    } catch (e) {
+      console.warn(`[FFmpeg] Falha ao remover ${filename}:`, e);
+    }
   };
 
   const processVideo = useCallback(async (
@@ -237,19 +276,23 @@ export function useFFmpegWorker() {
     }
 
     const ffmpeg = ffmpegRef.current;
-    abortRef.current = false;
+    
+    // Setup abort controller
+    abortControllerRef.current = new AbortController();
+    isAbortedRef.current = false;
+    
     setProcessing(true);
     setClips([]);
     
     const processedClips: ProcessedClip[] = [];
     const { duration: clipDuration, count } = config;
 
-    // Calculate effective duration with speed
+    // Calculate effective duration accounting for speed
     const effectiveClipDuration = clipDuration / config.speed;
     const availableTime = videoDuration - effectiveClipDuration;
     const interval = count > 1 ? availableTime / (count - 1) : 0;
 
-    console.log('[FFmpeg Worker] Configuração:', {
+    console.log('[FFmpeg] Configuração:', {
       videoDuration,
       clipDuration,
       effectiveClipDuration,
@@ -265,25 +308,42 @@ export function useFFmpegWorker() {
         totalClips: count,
         clipProgress: 0,
         stage: 'reading-file',
-        stageMessage: getStageMessage('reading-file'),
       });
 
       const inputData = await fetchFile(file);
       await ffmpeg.writeFile('input.mp4', inputData);
-      console.log('[FFmpeg Worker] Arquivo de entrada escrito');
+      console.log('[FFmpeg] Arquivo de entrada escrito');
 
-      // Analyze video dimensions
-      updateProgress({
-        stage: 'analyzing',
-        stageMessage: getStageMessage('analyzing'),
+      // Analyze video - get actual dimensions from video element
+      updateProgress({ stage: 'analyzing' });
+      
+      // Create a temporary video element to get dimensions
+      const videoEl = document.createElement('video');
+      videoEl.preload = 'metadata';
+      
+      const dimensionsPromise = new Promise<{ width: number; height: number }>((resolve) => {
+        videoEl.onloadedmetadata = () => {
+          resolve({ width: videoEl.videoWidth, height: videoEl.videoHeight });
+          URL.revokeObjectURL(videoEl.src);
+        };
+        videoEl.onerror = () => {
+          resolve({ width: 1920, height: 1080 }); // Fallback
+          URL.revokeObjectURL(videoEl.src);
+        };
+        videoEl.src = URL.createObjectURL(file);
       });
+      
+      const { width: inputWidth, height: inputHeight } = await dimensionsPromise;
+      console.log(`[FFmpeg] Dimensões do vídeo: ${inputWidth}x${inputHeight}`);
 
-      // Default dimensions if probe fails
-      let inputWidth = 1920;
-      let inputHeight = 1080;
-
+      // Process each clip
       for (let i = 0; i < count; i++) {
-        if (abortRef.current) break;
+        // Check for abort
+        if (isAbortedRef.current) {
+          console.log('[FFmpeg] Processamento abortado pelo usuário');
+          updateProgress({ stage: 'aborted', stageMessage: 'Cancelado pelo usuário' });
+          break;
+        }
 
         const startTime = count === 1 ? 0 : Math.floor(i * interval);
         const caption = getCaption(config, i);
@@ -292,35 +352,56 @@ export function useFFmpegWorker() {
           currentClip: i + 1,
           totalClips: count,
           clipProgress: 0,
-          stage: 'applying-filters',
-          stageMessage: getStageMessage('applying-filters', i + 1, count),
+          stage: 'cleaning-metadata',
+          stageMessage: `Corte ${i + 1}/${count}: ${STAGE_MESSAGES['cleaning-metadata']}`,
         });
 
-        console.log(`[FFmpeg Worker] Processando corte ${i + 1}: ${startTime}s - ${startTime + effectiveClipDuration}s`);
+        console.log(`[FFmpeg] Processando corte ${i + 1}: ${startTime}s - ${startTime + effectiveClipDuration}s`);
 
         const outputName = `viral_clip_${i + 1}.mp4`;
-        const filterChain = buildFilterChain(config, i, inputWidth, inputHeight);
+        
+        // Build filter chain with stage callbacks
+        const filterChain = buildFilterChain(
+          config, 
+          i, 
+          inputWidth, 
+          inputHeight,
+          (stage) => updateProgress({ 
+            stage, 
+            stageMessage: `Corte ${i + 1}/${count}: ${STAGE_MESSAGES[stage]}` 
+          })
+        );
 
-        // Build FFmpeg command
+        // Build FFmpeg command with optimized settings
         const ffmpegArgs = [
           '-ss', startTime.toString(),
           '-i', 'input.mp4',
           '-t', effectiveClipDuration.toFixed(2),
-          '-map_metadata', '-1', // Remove all metadata
+          '-map_metadata', '-1', // Remove ALL metadata for anti-detection
+          '-fflags', '+bitexact', // Ensure no timestamps leak
+          '-flags:v', '+bitexact',
+          '-flags:a', '+bitexact',
           '-vf', filterChain,
         ];
 
-        // Audio speed adjustment
+        // Audio speed adjustment with tempo
         if (config.speed !== 1.0) {
-          ffmpegArgs.push('-af', `atempo=${config.speed.toFixed(2)}`);
+          // atempo only supports 0.5-2.0, chain if needed
+          const tempo = config.speed;
+          if (tempo >= 0.5 && tempo <= 2.0) {
+            ffmpegArgs.push('-af', `atempo=${tempo.toFixed(2)}`);
+          }
         }
 
         ffmpegArgs.push(
           '-c:v', 'libx264',
           '-preset', 'fast',
-          '-crf', '23',
+          '-crf', '22', // Slightly better quality
+          '-profile:v', 'high',
+          '-level', '4.1',
           '-c:a', 'aac',
           '-b:a', '128k',
+          '-ar', '44100',
           '-movflags', '+faststart',
           '-y',
           outputName
@@ -328,20 +409,34 @@ export function useFFmpegWorker() {
 
         updateProgress({
           stage: 'encoding',
-          stageMessage: getStageMessage('encoding', i + 1, count),
+          stageMessage: `Corte ${i + 1}/${count}: ${STAGE_MESSAGES['encoding']}`,
         });
 
+        // Execute FFmpeg
         await ffmpeg.exec(ffmpegArgs);
 
-        // Read output
+        // Check abort again after encoding
+        if (isAbortedRef.current) {
+          await cleanupFile(ffmpeg, outputName);
+          break;
+        }
+
+        // Read output and immediately cleanup
         updateProgress({
           stage: 'finalizing',
-          stageMessage: getStageMessage('finalizing'),
+          stageMessage: `Corte ${i + 1}/${count}: ${STAGE_MESSAGES['finalizing']}`,
         });
 
         const data = await ffmpeg.readFile(outputName);
+        
+        // CRITICAL: Immediately delete from virtual FS to prevent RAM overflow
+        await cleanupFile(ffmpeg, outputName);
+        
+        // Convert to Blob - copy data to regular ArrayBuffer to avoid SharedArrayBuffer issues
         const uint8Array = data instanceof Uint8Array ? data : new TextEncoder().encode(data as string);
-        const blob = new Blob([new Uint8Array(uint8Array)], { type: 'video/mp4' });
+        const arrayBuffer = new ArrayBuffer(uint8Array.byteLength);
+        new Uint8Array(arrayBuffer).set(uint8Array);
+        const blob = new Blob([arrayBuffer], { type: 'video/mp4' });
         const url = URL.createObjectURL(blob);
 
         const clip: ProcessedClip = {
@@ -357,24 +452,31 @@ export function useFFmpegWorker() {
         processedClips.push(clip);
         setClips(prev => [...prev, clip]);
 
-        await ffmpeg.deleteFile(outputName);
-        console.log(`[FFmpeg Worker] Corte ${i + 1} concluído`);
+        console.log(`[FFmpeg] Corte ${i + 1} concluído e memória limpa`);
       }
 
-      await ffmpeg.deleteFile('input.mp4');
+      // Cleanup input file
+      await cleanupFile(ffmpeg, 'input.mp4');
 
-      updateProgress({
-        currentClip: count,
-        totalClips: count,
-        clipProgress: 100,
-        stage: 'complete',
-        stageMessage: getStageMessage('complete'),
-      });
+      if (!isAbortedRef.current) {
+        updateProgress({
+          currentClip: count,
+          totalClips: count,
+          clipProgress: 100,
+          stage: 'complete',
+        });
+        console.log('[FFmpeg] Todos os cortes processados:', processedClips.length);
+      }
 
-      console.log('[FFmpeg Worker] Todos os cortes processados:', processedClips.length);
       return processedClips;
     } catch (error) {
-      console.error('[FFmpeg Worker] Erro no processamento:', error);
+      console.error('[FFmpeg] Erro no processamento:', error);
+      
+      // Cleanup on error
+      try {
+        await cleanupFile(ffmpeg, 'input.mp4');
+      } catch {}
+      
       updateProgress({
         stage: 'error',
         stageMessage: `Erro: ${error instanceof Error ? error.message : 'Falha no processamento'}`,
@@ -382,23 +484,53 @@ export function useFFmpegWorker() {
       throw error;
     } finally {
       setProcessing(false);
+      abortControllerRef.current = null;
     }
   }, [loaded, updateProgress]);
 
-  const abort = useCallback(() => {
-    abortRef.current = true;
-  }, []);
+  const abort = useCallback(async () => {
+    console.log('[FFmpeg] Iniciando abort...');
+    isAbortedRef.current = true;
+    
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Try to terminate FFmpeg if possible
+    if (ffmpegRef.current) {
+      try {
+        // FFmpeg.wasm doesn't have a direct abort, but we can try to terminate
+        await ffmpegRef.current.terminate();
+        ffmpegRef.current = null;
+        setLoaded(false);
+      } catch (e) {
+        console.warn('[FFmpeg] Erro ao terminar:', e);
+      }
+    }
+    
+    setProcessing(false);
+    updateProgress({ 
+      stage: 'aborted', 
+      stageMessage: 'Processamento cancelado pelo usuário' 
+    });
+  }, [updateProgress]);
 
   const reset = useCallback(() => {
-    clips.forEach(clip => URL.revokeObjectURL(clip.url));
+    // Revoke all blob URLs to free memory
+    clips.forEach(clip => {
+      try {
+        URL.revokeObjectURL(clip.url);
+      } catch {}
+    });
     setClips([]);
     setProgress({
       currentClip: 0,
       totalClips: 0,
       clipProgress: 0,
       stage: 'idle',
-      stageMessage: getStageMessage('idle'),
+      stageMessage: STAGE_MESSAGES['idle'],
     });
+    isAbortedRef.current = false;
   }, [clips]);
 
   return {
