@@ -13,7 +13,8 @@ import {
   Type, 
   Film, 
   Package,
-  Ban
+  Ban,
+  RefreshCw
 } from 'lucide-react';
 import { ProcessingProgress, ProcessingStage } from '@/hooks/useFFmpegWorker';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,7 @@ interface ProcessingOverlayProps {
   progress: ProcessingProgress;
   isProcessing: boolean;
   onAbort?: () => void;
+  onRetryLoad?: () => void;
 }
 
 const stageConfig: Record<ProcessingStage, { icon: typeof Loader2; color: string; label: string }> = {
@@ -52,7 +54,7 @@ const pipelineStages: ProcessingStage[] = [
   'encoding',
 ];
 
-export function ProcessingOverlay({ progress, isProcessing, onAbort }: ProcessingOverlayProps) {
+export function ProcessingOverlay({ progress, isProcessing, onAbort, onRetryLoad }: ProcessingOverlayProps) {
   const config = stageConfig[progress.stage];
   const Icon = config.icon;
   
@@ -217,6 +219,17 @@ export function ProcessingOverlay({ progress, isProcessing, onAbort }: Processin
               <XCircle className="w-5 h-5" />
               {progress.stageMessage}
             </p>
+            {progress.stageMessage.includes('FFmpeg') && onRetryLoad && (
+              <Button
+                onClick={onRetryLoad}
+                variant="outline"
+                size="sm"
+                className="mt-3 gap-2 border-destructive/30 text-destructive hover:bg-destructive/10"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Tentar Recarregar Engine
+              </Button>
+            )}
           </motion.div>
         )}
       </AnimatePresence>

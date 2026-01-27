@@ -182,6 +182,7 @@ const Index = () => {
                 progress={progress}
                 isProcessing={processing}
                 onAbort={abort}
+                onRetryLoad={loadFFmpeg}
               />
             )}
           </div>
