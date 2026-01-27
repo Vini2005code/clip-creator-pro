@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Download, Package, CheckCircle2, Loader2 } from 'lucide-react';
+import { Package, CheckCircle2, Loader2 } from 'lucide-react';
 import JSZip from 'jszip';
 import { ProcessedClip } from '@/hooks/useFFmpegWorker';
 import { Button } from '@/components/ui/button';
@@ -12,38 +12,85 @@ interface ViralClipsGridProps {
 
 export function ViralClipsGrid({ clips }: ViralClipsGridProps) {
   const [downloadingZip, setDownloadingZip] = useState(false);
+  const [zipProgress, setZipProgress] = useState(0);
 
   const handleDownloadAll = async () => {
-    if (clips.length === 0) return;
+    if (clips.length === 0 || downloadingZip) return;
     
     setDownloadingZip(true);
+    setZipProgress(0);
+    
     try {
+      console.log('[ZIP] Iniciando compactação de', clips.length, 'arquivos');
+      
+      // Create new JSZip instance
       const zip = new JSZip();
-      const folder = zip.folder('viral_cuts');
+      const folder = zip.folder('cortes_virais');
       
-      if (folder) {
-        for (const clip of clips) {
-          const arrayBuffer = await clip.blob.arrayBuffer();
-          folder.file(clip.name, arrayBuffer);
-        }
+      if (!folder) {
+        throw new Error('Falha ao criar pasta no ZIP');
       }
+
+      // Add each clip blob to the ZIP
+      for (let i = 0; i < clips.length; i++) {
+        const clip = clips[i];
+        
+        // Convert blob to ArrayBuffer
+        const arrayBuffer = await clip.blob.arrayBuffer();
+        
+        // Add to ZIP with proper filename
+        const filename = clip.name || `corte_${i + 1}.mp4`;
+        folder.file(filename, arrayBuffer);
+        
+        // Update progress
+        const progress = Math.round(((i + 1) / clips.length) * 50);
+        setZipProgress(progress);
+        
+        console.log(`[ZIP] Adicionado: ${filename}`);
+      }
+
+      console.log('[ZIP] Gerando arquivo ZIP...');
       
-      const content = await zip.generateAsync({ 
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 }
-      });
-      
+      // Generate ZIP with compression
+      const content = await zip.generateAsync(
+        { 
+          type: 'blob',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        },
+        (metadata) => {
+          // Update progress during generation (50-100%)
+          const progress = 50 + Math.round(metadata.percent / 2);
+          setZipProgress(progress);
+        }
+      );
+
+      console.log('[ZIP] ZIP gerado, tamanho:', (content.size / 1024 / 1024).toFixed(2), 'MB');
+
+      // Create download URL from the generated blob
       const url = URL.createObjectURL(content);
+      
+      // Create and trigger download
       const a = document.createElement('a');
+      a.style.display = 'none';
       a.href = url;
-      a.download = `viral_cuts_${new Date().toISOString().split('T')[0]}.zip`;
+      a.download = `cortes_virais_${new Date().toISOString().split('T')[0]}.zip`;
+      
       document.body.appendChild(a);
       a.click();
+      
+      // Cleanup after small delay
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      
+      console.log('[ZIP] Download iniciado com sucesso');
+    } catch (error) {
+      console.error('[ZIP] Erro ao criar ZIP:', error);
     } finally {
       setDownloadingZip(false);
+      setZipProgress(0);
     }
   };
 
@@ -79,12 +126,12 @@ export function ViralClipsGrid({ clips }: ViralClipsGridProps) {
             disabled={downloadingZip}
             variant="secondary"
             size="lg"
-            className="gap-2"
+            className="gap-2 min-w-[180px]"
           >
             {downloadingZip ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Compactando...
+                Compactando... {zipProgress}%
               </>
             ) : (
               <>
