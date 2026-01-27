@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Play, Pause, Download, Clock, Type } from 'lucide-react';
+import { Play, Pause, Download, Clock, Type, Loader2 } from 'lucide-react';
 import { ProcessedClip } from '@/hooks/useFFmpegWorker';
 import { Button } from '@/components/ui/button';
 
@@ -11,6 +11,7 @@ interface ViralClipCardProps {
 
 export function ViralClipCard({ clip, index }: ViralClipCardProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const handleTogglePlay = () => {
@@ -29,13 +30,36 @@ export function ViralClipCard({ clip, index }: ViralClipCardProps) {
     setIsPlaying(!isPlaying);
   };
 
-  const handleDownload = () => {
-    const a = document.createElement('a');
-    a.href = clip.url;
-    a.download = clip.name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleDownload = async () => {
+    if (isDownloading) return;
+    
+    setIsDownloading(true);
+    try {
+      // Create a fresh blob URL from the stored blob to ensure validity
+      const freshUrl = URL.createObjectURL(clip.blob);
+      
+      // Create temporary anchor element
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = freshUrl;
+      a.download = clip.name || `corte_${index + 1}.mp4`;
+      
+      // Append to body, click, and cleanup
+      document.body.appendChild(a);
+      a.click();
+      
+      // Small delay before cleanup to ensure download starts
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      document.body.removeChild(a);
+      URL.revokeObjectURL(freshUrl);
+      
+      console.log(`[Download] Arquivo ${clip.name} baixado com sucesso`);
+    } catch (error) {
+      console.error('[Download] Erro ao baixar:', error);
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   const formatTime = (seconds: number): string => {
@@ -112,11 +136,21 @@ export function ViralClipCard({ clip, index }: ViralClipCardProps) {
 
         <Button
           onClick={handleDownload}
+          disabled={isDownloading}
           className="w-full gap-2"
           size="sm"
         >
-          <Download className="w-4 h-4" />
-          Download
+          {isDownloading ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Baixando...
+            </>
+          ) : (
+            <>
+              <Download className="w-4 h-4" />
+              Download
+            </>
+          )}
         </Button>
       </div>
     </motion.div>
