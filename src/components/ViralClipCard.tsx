@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, forwardRef } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, Download, Clock, Type, Loader2 } from 'lucide-react';
 import { ProcessedClip } from '@/hooks/useFFmpegWorker';
@@ -9,7 +9,7 @@ interface ViralClipCardProps {
   index: number;
 }
 
-export function ViralClipCard({ clip, index }: ViralClipCardProps) {
+export const ViralClipCard = forwardRef<HTMLDivElement, ViralClipCardProps>(({ clip, index }, ref) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -70,6 +70,7 @@ export function ViralClipCard({ clip, index }: ViralClipCardProps) {
 
   return (
     <motion.div
+      ref={ref}
       initial={{ opacity: 0, scale: 0.9, y: 20 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       transition={{ delay: index * 0.1 }}
@@ -155,4 +156,6 @@ export function ViralClipCard({ clip, index }: ViralClipCardProps) {
       </div>
     </motion.div>
   );
-}
+});
+
+ViralClipCard.displayName = 'ViralClipCard';

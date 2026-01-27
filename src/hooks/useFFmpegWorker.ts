@@ -232,9 +232,9 @@ export function useFFmpegWorker() {
     );
 
     // 6. Digital grain (noise) for hash uniqueness - invisible but effective
+    // Note: 'seed' parameter is not supported in FFmpeg WASM, using compatible syntax
     onStageChange('generating-hash');
-    const grainSeed = Math.floor(Math.random() * 999999);
-    filters.push(`noise=c0s=2:c0f=t:allf=t:seed=${grainSeed}`);
+    filters.push(`noise=alls=3:allf=t+u`);
 
     // 7. Caption overlay (if enabled)
     if (caption) {
@@ -403,8 +403,9 @@ export function useFFmpegWorker() {
 
         ffmpegArgs.push(
           '-c:v', 'libx264',
+          '-pix_fmt', 'yuv420p', // Required for web player compatibility
           '-preset', 'fast',
-          '-crf', '22', // Slightly better quality
+          '-crf', '22',
           '-profile:v', 'high',
           '-level', '4.1',
           '-c:a', 'aac',
@@ -421,7 +422,12 @@ export function useFFmpegWorker() {
         });
 
         // Execute FFmpeg
-        await ffmpeg.exec(ffmpegArgs);
+        const exitCode = await ffmpeg.exec(ffmpegArgs);
+        
+        if (exitCode !== 0) {
+          console.error(`[FFmpeg] Comando falhou com código ${exitCode}`);
+          throw new Error(`FFmpeg retornou código de erro ${exitCode}`);
+        }
 
         // Check abort again after encoding
         if (isAbortedRef.current) {
@@ -440,12 +446,16 @@ export function useFFmpegWorker() {
         // CRITICAL: Immediately delete from virtual FS to prevent RAM overflow
         await cleanupFile(ffmpeg, outputName);
         
-        // Convert to Blob - copy data to regular ArrayBuffer to avoid SharedArrayBuffer issues
-        const uint8Array = data instanceof Uint8Array ? data : new TextEncoder().encode(data as string);
-        const arrayBuffer = new ArrayBuffer(uint8Array.byteLength);
-        new Uint8Array(arrayBuffer).set(uint8Array);
+        // Convert to Blob - handle SharedArrayBuffer from FFmpeg WASM
+        // FFmpeg readFile returns Uint8Array backed by SharedArrayBuffer
+        // We need to copy to a regular ArrayBuffer for Blob compatibility
+        const rawData = data as Uint8Array;
+        const arrayBuffer = new ArrayBuffer(rawData.byteLength);
+        new Uint8Array(arrayBuffer).set(rawData);
         const blob = new Blob([arrayBuffer], { type: 'video/mp4' });
         const url = URL.createObjectURL(blob);
+        
+        console.log(`[FFmpeg] Clip ${i + 1} gerado: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
 
         const clip: ProcessedClip = {
           id: `viral-clip-${i + 1}-${Date.now()}`,
