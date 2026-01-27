@@ -102,7 +102,8 @@ export function useFFmpegWorker() {
   }, []);
 
   const load = useCallback(async () => {
-    if (loaded || loading) return;
+    // Check ref directly to avoid stale closure
+    if (ffmpegRef.current || loading) return;
     
     setLoading(true);
     updateProgress({ stage: 'loading-ffmpeg' });
@@ -271,8 +272,15 @@ export function useFFmpegWorker() {
     config: CutConfig,
     videoDuration: number
   ): Promise<ProcessedClip[]> => {
-    if (!ffmpegRef.current || !loaded) {
-      throw new Error('FFmpeg não carregado');
+    // Check directly on the ref instead of stale state
+    if (!ffmpegRef.current) {
+      console.log('[FFmpeg] FFmpeg não está carregado, tentando carregar automaticamente...');
+      await load();
+      
+      // Re-check after load attempt
+      if (!ffmpegRef.current) {
+        throw new Error('FFmpeg não carregado');
+      }
     }
 
     const ffmpeg = ffmpegRef.current;
@@ -486,7 +494,7 @@ export function useFFmpegWorker() {
       setProcessing(false);
       abortControllerRef.current = null;
     }
-  }, [loaded, updateProgress]);
+  }, [load, updateProgress]);
 
   const abort = useCallback(async () => {
     console.log('[FFmpeg] Iniciando abort...');
