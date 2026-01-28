@@ -31,12 +31,7 @@ const stageConfig: Record<ProcessingStage, { icon: typeof Loader2; color: string
   'loading-ffmpeg': { icon: Loader2, color: 'text-primary', label: 'Motor FFmpeg' },
   'reading-file': { icon: FileVideo, color: 'text-primary', label: 'Lendo Arquivo' },
   'analyzing': { icon: Search, color: 'text-accent', label: 'Analisando' },
-  'cleaning-metadata': { icon: Trash2, color: 'text-warning', label: 'Limpando Metadados' },
-  'applying-crop': { icon: Crop, color: 'text-success', label: 'Smart Crop 9:16' },
-  'applying-zoom': { icon: Move, color: 'text-accent', label: 'Zoom Dinâmico' },
-  'applying-filters': { icon: Palette, color: 'text-warning', label: 'Filtros de Cor' },
-  'generating-hash': { icon: Fingerprint, color: 'text-primary', label: 'Hash Único' },
-  'adding-captions': { icon: Type, color: 'text-accent', label: 'Legendas' },
+  'applying-filters': { icon: Palette, color: 'text-warning', label: 'Aplicando Filtros' },
   'encoding': { icon: Film, color: 'text-primary', label: 'Codificando' },
   'finalizing': { icon: Package, color: 'text-success', label: 'Finalizando' },
   'complete': { icon: CheckCircle2, color: 'text-success', label: 'Concluído' },
@@ -44,14 +39,13 @@ const stageConfig: Record<ProcessingStage, { icon: typeof Loader2; color: string
   'aborted': { icon: Ban, color: 'text-warning', label: 'Cancelado' },
 };
 
-// Stages that appear in the visual pipeline
+// Stages that appear in the visual pipeline (simplified)
 const pipelineStages: ProcessingStage[] = [
-  'cleaning-metadata',
-  'applying-crop',
-  'applying-zoom',
+  'reading-file',
+  'analyzing',
   'applying-filters',
-  'generating-hash',
   'encoding',
+  'finalizing',
 ];
 
 export function ProcessingOverlay({ progress, isProcessing, onAbort, onRetryLoad }: ProcessingOverlayProps) {
@@ -114,7 +108,7 @@ export function ProcessingOverlay({ progress, isProcessing, onAbort, onRetryLoad
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             Estágios de Viralização
           </p>
-          <div className="grid grid-cols-6 gap-1">
+          <div className="grid grid-cols-5 gap-1">
             {pipelineStages.map((stage, index) => {
               const stageConf = stageConfig[stage];
               const StageIcon = stageConf.icon;

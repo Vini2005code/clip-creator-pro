@@ -116,25 +116,31 @@ export function useFFmpegWorker() {
           stageMessage: `Processando corte ${i + 1}/${count}...`
         }));
 
-        // COMANDO DE OURO: Simples, Seguro e Eficiente
+        // COMANDO DIAGNÓSTICO: Apenas crop + scale (sem filtros pesados)
         // - ss/t: corte preciso
         // - crop: transforma em 9:16 (vertical)
         // - scale: garante 1080x1920
-        // - eq/noise: altera o hash do arquivo (anti-shadowban)
-        // - pix_fmt yuv420p: OBRIGATÓRIO para funcionar no Windows/Mac
-        await ffmpeg.exec([
+        // - map_metadata -1: remove todos os metadados
+        // - pix_fmt yuv420p: OBRIGATÓRIO para compatibilidade
+        const exitCode = await ffmpeg.exec([
           '-ss', startTime.toFixed(2),
           '-i', 'input.mp4',
           '-t', config.duration.toString(),
-          '-vf', 'crop=ih*(9/16):ih:(iw-ih*(9/16))/2:0,scale=1080:1920,eq=brightness=0.03:contrast=1.05,noise=alls=2:allf=t',
+          '-vf', 'crop=ih*(9/16):ih:(iw-ih*(9/16))/2:0,scale=1080:1920',
+          '-map_metadata', '-1',
           '-c:v', 'libx264',
           '-pix_fmt', 'yuv420p', 
           '-preset', 'ultrafast',
-          '-crf', '26',
+          '-crf', '23',
           '-c:a', 'aac',
+          '-b:a', '128k',
           '-y',
           outputName
         ]);
+
+        if (exitCode !== 0) {
+          throw new Error(`FFmpeg falhou com código ${exitCode}`);
+        }
 
         // 2. Leitura Segura do Arquivo (Evita 0 bytes)
         const data = await ffmpeg.readFile(outputName);
