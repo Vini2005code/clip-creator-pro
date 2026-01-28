@@ -5,11 +5,13 @@ import { ViralCutterHeader } from '@/components/ViralCutterHeader';
 import { UploadZone } from '@/components/UploadZone';
 import { VideoPreviewEnhanced, VideoPreviewEnhancedRef } from '@/components/VideoPreviewEnhanced';
 import { ViralConfigPanel } from '@/components/ViralConfigPanel';
+import { SmartCaptionPanel } from '@/components/SmartCaptionPanel';
 import { ProcessingOverlay } from '@/components/ProcessingOverlay';
 import { ViralClipsGrid } from '@/components/ViralClipsGrid';
 import { AudioAnalyzerPanel } from '@/components/AudioAnalyzerPanel';
 import { useFFmpegWorker, CutConfig } from '@/hooks/useFFmpegWorker';
 import { useAudioAnalyzer } from '@/hooks/useAudioAnalyzer';
+import { DEFAULT_SMART_CAPTION_CONFIG, SmartCaptionConfig } from '@/hooks/useSmartCaption';
 import { Button } from '@/components/ui/button';
 
 const DEFAULT_CONFIG: CutConfig = {
@@ -27,6 +29,7 @@ const Index = () => {
   const [videoDuration, setVideoDuration] = useState(0);
   const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
   const [config, setConfig] = useState<CutConfig>(DEFAULT_CONFIG);
+  const [smartCaptionConfig, setSmartCaptionConfig] = useState<SmartCaptionConfig>(DEFAULT_SMART_CAPTION_CONFIG);
   const [error, setError] = useState<string | null>(null);
   const videoPreviewRef = useRef<VideoPreviewEnhancedRef>(null);
 
@@ -84,6 +87,10 @@ const Index = () => {
 
   const handleConfigChange = useCallback((updates: Partial<CutConfig>) => {
     setConfig(prev => ({ ...prev, ...updates }));
+  }, []);
+
+  const handleSmartCaptionChange = useCallback((updates: Partial<SmartCaptionConfig>) => {
+    setSmartCaptionConfig(prev => ({ ...prev, ...updates }));
   }, []);
 
   const handleAnalyzeAudio = useCallback(async () => {
@@ -208,6 +215,12 @@ const Index = () => {
                     config={config}
                     maxDuration={videoDuration}
                     onConfigChange={handleConfigChange}
+                  />
+
+                  {/* Smart Caption Panel */}
+                  <SmartCaptionPanel
+                    config={smartCaptionConfig}
+                    onConfigChange={handleSmartCaptionChange}
                   />
 
                   {/* Process button */}
