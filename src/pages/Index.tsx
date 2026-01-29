@@ -113,7 +113,20 @@ const Index = () => {
         await loadFFmpeg();
       }
 
-      await processVideo(selectedFile, config, videoDuration);
+      // Convert audio peaks to highlight format
+      const audioHighlights = audioAnalyzer.result?.peaks.map(peak => ({
+        time: peak.time,
+        intensity: peak.intensity
+      }));
+
+      // Pass smart caption config and audio highlights to processing
+      await processVideo(
+        selectedFile, 
+        config, 
+        videoDuration,
+        smartCaptionConfig,
+        audioHighlights
+      );
     } catch (err) {
       console.error('Processing error:', err);
       setError('Erro ao processar o vídeo. Verifique o console para mais detalhes.');

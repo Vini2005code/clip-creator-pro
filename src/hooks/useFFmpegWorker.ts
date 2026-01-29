@@ -1,12 +1,14 @@
 import { useState, useRef, useCallback } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { supabase } from '@/integrations/supabase/client';
+import { SmartCaptionConfig, SmartCaptionResult } from './useSmartCaption';
 
 export interface CutConfig {
   duration: number;
   count: number;
   speed: number;
-  zoomIntensity: number; // Mantido na interface mas desativado no motor para segurança
+  zoomIntensity: number;
   enableCaptions: boolean;
   captionStyle: 'hook' | 'parts' | 'custom';
   customCaption: string;
@@ -22,7 +24,13 @@ export interface ProcessedClip {
   caption: string;
 }
 
-export type ProcessingStage = 'idle' | 'loading-ffmpeg' | 'reading-file' | 'analyzing' | 'applying-filters' | 'encoding' | 'finalizing' | 'complete' | 'error' | 'aborted';
+export interface ClipTimings {
+  startTime: number;
+  endTime: number;
+  peakIntensity?: number;
+}
+
+export type ProcessingStage = 'idle' | 'loading-ffmpeg' | 'reading-file' | 'analyzing' | 'generating-captions' | 'applying-filters' | 'encoding' | 'finalizing' | 'complete' | 'error' | 'aborted';
 
 export interface ProcessingProgress {
   currentClip: number;
@@ -47,7 +55,6 @@ export function useFFmpegWorker() {
   const [clips, setClips] = useState<ProcessedClip[]>([]);
   const abortRef = useRef(false);
 
-  // Função para carregar o FFmpeg
   const load = useCallback(async () => {
     if (loaded || loading) return;
     setLoading(true);
@@ -56,7 +63,6 @@ export function useFFmpegWorker() {
       const ffmpeg = new FFmpeg();
       ffmpegRef.current = ffmpeg;
 
-      // Logs para debug
       ffmpeg.on('log', ({ message }) => console.log('[FFmpeg Log]', message));
       ffmpeg.on('progress', ({ progress: p }) => {
         setProgress(prev => ({ ...prev, clipProgress: Math.round(p * 100) }));
@@ -78,11 +84,183 @@ export function useFFmpegWorker() {
     }
   }, [loaded, loading]);
 
-  // Função Principal de Processamento
+  // Generate smart captions via edge function
+  const generateSmartCaptions = async (
+    clipStart: number,
+    clipEnd: number,
+    config: SmartCaptionConfig,
+    transcript?: string
+  ): Promise<SmartCaptionResult | null> => {
+    if (!config.enabled) return null;
+
+    try {
+      console.log('[FFmpegWorker] Generating smart captions...', { clipStart, clipEnd });
+      
+      const { data, error } = await supabase.functions.invoke('smart-caption', {
+        body: {
+          transcript: transcript || `Conteúdo do vídeo entre ${clipStart.toFixed(1)}s e ${clipEnd.toFixed(1)}s`,
+          startTime: clipStart,
+          endTime: clipEnd,
+          outputLanguage: config.outputLanguage,
+          enableRehook: config.enableRehook,
+          rehookStyle: config.rehookStyle,
+          retentionAdjust: config.retentionAdjust,
+        }
+      });
+
+      if (error) {
+        console.error('[FFmpegWorker] Smart caption error:', error);
+        return null;
+      }
+
+      console.log('[FFmpegWorker] Smart captions generated:', data);
+      return data;
+    } catch (err) {
+      console.error('[FFmpegWorker] Failed to generate smart captions:', err);
+      return null;
+    }
+  };
+
+  // Build drawtext filter for captions
+  const buildCaptionFilter = (
+    captions: SmartCaptionResult['captions'],
+    rehook: SmartCaptionResult['rehook'] | null,
+    config: SmartCaptionConfig
+  ): string => {
+    const filters: string[] = [];
+    
+    // Get font style based on config
+    const fontWeight = config.captionStyle === 'bold' ? 'bold' : '';
+    const fontSize = 48;
+    const fontColor = config.primaryColor.replace('#', '');
+    const highlightColor = config.secondaryColor.replace('#', '');
+    
+    // Add rehook at the beginning (0-1.5s)
+    if (rehook && config.enableRehook) {
+      const hookText = escapeFFmpegText(rehook.text.toUpperCase());
+      filters.push(
+        `drawtext=text='${hookText}':fontsize=56:fontcolor=0x${highlightColor}:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.15:enable='between(t,0,1.5)'`
+      );
+    }
+    
+    // Add each caption segment
+    captions.forEach((caption, index) => {
+      let text = caption.text;
+      
+      // Highlight keywords by making them uppercase (simple approach for FFmpeg)
+      caption.keywords.forEach(keyword => {
+        text = text.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), keyword.toUpperCase());
+      });
+      
+      const escapedText = escapeFFmpegText(text);
+      const yPosition = 'h*0.82'; // Bottom area for subtitles
+      
+      filters.push(
+        `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=0x${fontColor}:borderw=2:bordercolor=black:x=(w-text_w)/2:y=${yPosition}:enable='between(t,${caption.start.toFixed(2)},${caption.end.toFixed(2)})'`
+      );
+    });
+    
+    return filters.join(',');
+  };
+
+  // Escape text for FFmpeg drawtext filter
+  const escapeFFmpegText = (text: string): string => {
+    return text
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "'\\''")
+      .replace(/:/g, '\\:')
+      .replace(/\[/g, '\\[')
+      .replace(/\]/g, '\\]')
+      .replace(/%/g, '\\%');
+  };
+
+  // Calculate clip timings with highlight-first logic
+  const calculateClipTimings = (
+    videoDuration: number,
+    config: CutConfig,
+    audioHighlights?: { time: number; intensity: number }[]
+  ): ClipTimings[] => {
+    const timings: ClipTimings[] = [];
+    const clipDuration = config.duration;
+    const count = config.count;
+
+    if (audioHighlights && audioHighlights.length > 0) {
+      // Sort highlights by intensity (best first)
+      const sortedHighlights = [...audioHighlights]
+        .sort((a, b) => b.intensity - a.intensity)
+        .slice(0, count);
+
+      // Use best highlights as start points
+      sortedHighlights.forEach((highlight, index) => {
+        // Start clip 2-3 seconds before the peak to capture the buildup
+        let startTime = Math.max(0, highlight.time - 3);
+        let endTime = startTime + clipDuration;
+        
+        // Ensure we don't go past video duration
+        if (endTime > videoDuration) {
+          endTime = videoDuration;
+          startTime = Math.max(0, endTime - clipDuration);
+        }
+
+        // Check for overlap with existing timings
+        const hasOverlap = timings.some(t => 
+          (startTime >= t.startTime && startTime < t.endTime) ||
+          (endTime > t.startTime && endTime <= t.endTime)
+        );
+
+        if (!hasOverlap) {
+          timings.push({
+            startTime,
+            endTime,
+            peakIntensity: highlight.intensity
+          });
+        }
+      });
+
+      // Fill remaining slots with linear distribution if needed
+      if (timings.length < count) {
+        const interval = (videoDuration - clipDuration) / (count - timings.length);
+        let currentStart = 0;
+        
+        while (timings.length < count && currentStart + clipDuration <= videoDuration) {
+          const hasOverlap = timings.some(t => 
+            (currentStart >= t.startTime && currentStart < t.endTime) ||
+            (currentStart + clipDuration > t.startTime && currentStart + clipDuration <= t.endTime)
+          );
+          
+          if (!hasOverlap) {
+            timings.push({
+              startTime: currentStart,
+              endTime: currentStart + clipDuration
+            });
+          }
+          currentStart += interval;
+        }
+      }
+    } else {
+      // Fallback: linear distribution
+      const interval = (videoDuration - clipDuration) / (count > 1 ? count - 1 : 1);
+      
+      for (let i = 0; i < count; i++) {
+        const startTime = i * interval;
+        timings.push({
+          startTime,
+          endTime: startTime + clipDuration
+        });
+      }
+    }
+
+    // Sort by position in video
+    return timings.sort((a, b) => a.startTime - b.startTime);
+  };
+
+  // Main processing function
   const processVideo = useCallback(async (
     file: File,
     config: CutConfig,
-    videoDuration: number
+    videoDuration: number,
+    smartCaptionConfig?: SmartCaptionConfig,
+    audioHighlights?: { time: number; intensity: number }[]
   ): Promise<ProcessedClip[]> => {
     if (!ffmpegRef.current) await load();
     const ffmpeg = ffmpegRef.current!;
@@ -92,12 +270,13 @@ export function useFFmpegWorker() {
     setClips([]);
     
     const processedClips: ProcessedClip[] = [];
-    const count = config.count;
-    // Cálculo simples do intervalo entre cortes
-    const interval = (videoDuration - config.duration) / (count > 1 ? count - 1 : 1);
+    
+    // Calculate clip timings (with highlight-first logic if available)
+    const clipTimings = calculateClipTimings(videoDuration, config, audioHighlights);
+    const count = clipTimings.length;
 
     try {
-      // 1. Escrever arquivo na memória
+      // 1. Write input file
       setProgress(p => ({ ...p, stage: 'reading-file', stageMessage: 'Lendo arquivo...' }));
       const inputData = await fetchFile(file);
       await ffmpeg.writeFile('input.mp4', inputData);
@@ -105,8 +284,28 @@ export function useFFmpegWorker() {
       for (let i = 0; i < count; i++) {
         if (abortRef.current) break;
 
-        const startTime = i * interval;
+        const { startTime, endTime, peakIntensity } = clipTimings[i];
+        const clipDuration = endTime - startTime;
         const outputName = `clip_${i + 1}.mp4`;
+
+        // 2. Generate smart captions if enabled
+        let captionResult: SmartCaptionResult | null = null;
+        if (smartCaptionConfig?.enabled) {
+          setProgress(p => ({
+            ...p,
+            currentClip: i + 1,
+            totalClips: count,
+            stage: 'generating-captions',
+            stageMessage: `Gerando legendas IA (${i + 1}/${count})...`
+          }));
+          
+          captionResult = await generateSmartCaptions(
+            startTime,
+            endTime,
+            smartCaptionConfig,
+            peakIntensity ? `Momento de alta energia (${Math.round(peakIntensity * 100)}% intensidade)` : undefined
+          );
+        }
 
         setProgress(p => ({
           ...p,
@@ -116,20 +315,30 @@ export function useFFmpegWorker() {
           stageMessage: `Processando corte ${i + 1}/${count}...`
         }));
 
-        // COMANDO DIAGNÓSTICO: Apenas crop + scale (sem filtros pesados)
-        // - ss/t: corte preciso
-        // - crop: transforma em 9:16 (vertical)
-        // - scale: garante 1080x1920
-        // - map_metadata -1: remove todos os metadados
-        // - pix_fmt yuv420p: OBRIGATÓRIO para compatibilidade
+        // 3. Build filter chain
+        let filterChain = 'crop=ih*(9/16):ih:(iw-ih*(9/16))/2:0,scale=1080:1920';
+        
+        // Add caption overlay if we have captions
+        if (captionResult && smartCaptionConfig) {
+          const captionFilter = buildCaptionFilter(
+            captionResult.captions,
+            captionResult.rehook,
+            smartCaptionConfig
+          );
+          if (captionFilter) {
+            filterChain += ',' + captionFilter;
+          }
+        }
+
+        // 4. Execute FFmpeg with captions
         const exitCode = await ffmpeg.exec([
           '-ss', startTime.toFixed(2),
           '-i', 'input.mp4',
-          '-t', config.duration.toString(),
-          '-vf', 'crop=ih*(9/16):ih:(iw-ih*(9/16))/2:0,scale=1080:1920',
+          '-t', clipDuration.toFixed(2),
+          '-vf', filterChain,
           '-map_metadata', '-1',
           '-c:v', 'libx264',
-          '-pix_fmt', 'yuv420p', 
+          '-pix_fmt', 'yuv420p',
           '-preset', 'ultrafast',
           '-crf', '23',
           '-c:a', 'aac',
@@ -142,7 +351,7 @@ export function useFFmpegWorker() {
           throw new Error(`FFmpeg falhou com código ${exitCode}`);
         }
 
-        // 2. Leitura Segura do Arquivo (Evita 0 bytes)
+        // 5. Read and create blob
         const data = await ffmpeg.readFile(outputName);
         const uint8Array = new Uint8Array(data as any);
         const blob = new Blob([uint8Array.buffer], { type: 'video/mp4' });
@@ -158,14 +367,14 @@ export function useFFmpegWorker() {
           blob,
           url,
           startTime,
-          endTime: startTime + config.duration,
-          caption: ''
+          endTime,
+          caption: captionResult?.rehook?.text || ''
         };
 
         processedClips.push(clip);
         setClips(prev => [...prev, clip]);
         
-        // Limpa memória imediatamente
+        // Cleanup clip file
         await ffmpeg.deleteFile(outputName);
       }
 
