@@ -31,6 +31,7 @@ const stageConfig: Record<ProcessingStage, { icon: typeof Loader2; color: string
   'loading-ffmpeg': { icon: Loader2, color: 'text-primary', label: 'Motor FFmpeg' },
   'reading-file': { icon: FileVideo, color: 'text-primary', label: 'Lendo Arquivo' },
   'analyzing': { icon: Search, color: 'text-accent', label: 'Analisando' },
+  'generating-captions': { icon: Type, color: 'text-accent', label: 'Gerando Legendas' },
   'applying-filters': { icon: Palette, color: 'text-warning', label: 'Aplicando Filtros' },
   'encoding': { icon: Film, color: 'text-primary', label: 'Codificando' },
   'finalizing': { icon: Package, color: 'text-success', label: 'Finalizando' },
@@ -39,10 +40,10 @@ const stageConfig: Record<ProcessingStage, { icon: typeof Loader2; color: string
   'aborted': { icon: Ban, color: 'text-warning', label: 'Cancelado' },
 };
 
-// Stages that appear in the visual pipeline (simplified)
+// Stages that appear in the visual pipeline
 const pipelineStages: ProcessingStage[] = [
   'reading-file',
-  'analyzing',
+  'generating-captions',
   'applying-filters',
   'encoding',
   'finalizing',
