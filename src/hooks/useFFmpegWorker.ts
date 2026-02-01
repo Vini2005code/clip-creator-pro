@@ -91,14 +91,19 @@ export function useFFmpegWorker() {
     config: SmartCaptionConfig,
     transcript?: string
   ): Promise<SmartCaptionResult | null> => {
-    if (!config.enabled) return null;
+    if (!config.enabled) {
+      console.log('[FFmpegWorker] Smart captions disabled, skipping...');
+      return null;
+    }
+
+    const clipDuration = clipEnd - clipStart;
 
     try {
-      console.log('[FFmpegWorker] Generating smart captions...', { clipStart, clipEnd });
+      console.log('[FFmpegWorker] Generating smart captions...', { clipStart, clipEnd, config });
       
       const { data, error } = await supabase.functions.invoke('smart-caption', {
         body: {
-          transcript: transcript || `Conteúdo do vídeo entre ${clipStart.toFixed(1)}s e ${clipEnd.toFixed(1)}s`,
+          transcript: transcript || `Conteúdo viral do momento ${clipStart.toFixed(1)}s até ${clipEnd.toFixed(1)}s`,
           startTime: clipStart,
           endTime: clipEnd,
           outputLanguage: config.outputLanguage,
@@ -109,16 +114,68 @@ export function useFFmpegWorker() {
       });
 
       if (error) {
-        console.error('[FFmpegWorker] Smart caption error:', error);
-        return null;
+        console.error('[FFmpegWorker] Smart caption API error:', error);
+        // Return fallback captions instead of null
+        return createFallbackCaptions(clipDuration, config);
+      }
+
+      // Validate response has required data
+      if (!data || (!data.captions?.length && !data.rehook)) {
+        console.warn('[FFmpegWorker] Invalid caption response, using fallback');
+        return createFallbackCaptions(clipDuration, config);
       }
 
       console.log('[FFmpegWorker] Smart captions generated:', data);
       return data;
     } catch (err) {
       console.error('[FFmpegWorker] Failed to generate smart captions:', err);
-      return null;
+      // Return fallback captions on error
+      return createFallbackCaptions(clipDuration, config);
     }
+  };
+
+  // Create fallback captions when API fails
+  const createFallbackCaptions = (
+    duration: number,
+    config: SmartCaptionConfig
+  ): SmartCaptionResult => {
+    const isPortuguese = config.outputLanguage === 'pt';
+    
+    const hooks = {
+      curiosity: isPortuguese ? 'VOCÊ NÃO VAI ACREDITAR...' : 'YOU WON\'T BELIEVE...',
+      conflict: isPortuguese ? 'ISSO MUDOU TUDO!' : 'THIS CHANGED EVERYTHING!',
+      promise: isPortuguese ? 'ASSISTA ATÉ O FINAL' : 'WATCH UNTIL THE END',
+    };
+
+    const segmentDuration = Math.min(3, duration / 3);
+    const captions: SmartCaptionResult['captions'] = [];
+    
+    // Generate timed caption segments
+    for (let i = 0; i < Math.floor(duration / segmentDuration); i++) {
+      const start = 1.5 + (i * segmentDuration);
+      const end = Math.min(start + segmentDuration, duration);
+      if (end <= start) break;
+      
+      captions.push({
+        text: isPortuguese ? `Parte ${i + 1}` : `Part ${i + 1}`,
+        start,
+        end,
+        keywords: [],
+        isHook: false,
+      });
+    }
+
+    return {
+      transcription: '',
+      words: [],
+      captions,
+      rehook: config.enableRehook ? {
+        text: hooks[config.rehookStyle],
+        style: config.rehookStyle,
+      } : null,
+      suggestedStartTime: 0,
+      suggestedEndTime: duration,
+    };
   };
 
   // Build drawtext filter for captions

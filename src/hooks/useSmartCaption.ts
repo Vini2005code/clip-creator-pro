@@ -24,7 +24,7 @@ export interface SmartCaption {
   start: number;
   end: number;
   keywords: string[];
-  isHook: boolean;
+  isHook?: boolean;
 }
 
 export interface RehookSuggestion {
@@ -42,7 +42,7 @@ export interface SmartCaptionResult {
 }
 
 export const DEFAULT_SMART_CAPTION_CONFIG: SmartCaptionConfig = {
-  enabled: false,
+  enabled: true,
   outputLanguage: 'pt',
   enableRehook: true,
   rehookStyle: 'curiosity',
