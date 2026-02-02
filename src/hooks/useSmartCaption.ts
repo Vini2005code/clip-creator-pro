@@ -8,6 +8,7 @@ export interface SmartCaptionConfig {
   rehookStyle: 'curiosity' | 'conflict' | 'promise';
   retentionAdjust: boolean;
   captionStyle: 'modern' | 'bold' | 'minimal';
+  captionPosition: 'top' | 'center' | 'bottom';
   primaryColor: string;
   secondaryColor: string;
 }
@@ -48,6 +49,7 @@ export const DEFAULT_SMART_CAPTION_CONFIG: SmartCaptionConfig = {
   rehookStyle: 'curiosity',
   retentionAdjust: true,
   captionStyle: 'modern',
+  captionPosition: 'bottom',
   primaryColor: '#FFFFFF',
   secondaryColor: '#FFD700',
 };

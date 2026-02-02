@@ -3,6 +3,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { supabase } from '@/integrations/supabase/client';
 import { SmartCaptionConfig, SmartCaptionResult } from './useSmartCaption';
+import { renderCaptionsWithFallback } from '@/lib/ffmpeg/captionPipeline';
 
 export interface CutConfig {
   duration: number;
@@ -55,8 +56,8 @@ export function useFFmpegWorker() {
   const [clips, setClips] = useState<ProcessedClip[]>([]);
   const abortRef = useRef(false);
 
-  const load = useCallback(async () => {
-    if (loaded || loading) return;
+  const load = useCallback(async (opts?: { force?: boolean }) => {
+    if (!opts?.force && (loaded || loading)) return;
     setLoading(true);
     
     try {
@@ -178,57 +179,9 @@ export function useFFmpegWorker() {
     };
   };
 
-  // Build drawtext filter for captions
-  const buildCaptionFilter = (
-    captions: SmartCaptionResult['captions'],
-    rehook: SmartCaptionResult['rehook'] | null,
-    config: SmartCaptionConfig
-  ): string => {
-    const filters: string[] = [];
-    
-    // Get font style based on config
-    const fontWeight = config.captionStyle === 'bold' ? 'bold' : '';
-    const fontSize = 48;
-    const fontColor = config.primaryColor.replace('#', '');
-    const highlightColor = config.secondaryColor.replace('#', '');
-    
-    // Add rehook at the beginning (0-1.5s)
-    if (rehook && config.enableRehook) {
-      const hookText = escapeFFmpegText(rehook.text.toUpperCase());
-      filters.push(
-        `drawtext=text='${hookText}':fontsize=56:fontcolor=0x${highlightColor}:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.15:enable='between(t,0,1.5)'`
-      );
-    }
-    
-    // Add each caption segment
-    captions.forEach((caption, index) => {
-      let text = caption.text;
-      
-      // Highlight keywords by making them uppercase (simple approach for FFmpeg)
-      caption.keywords.forEach(keyword => {
-        text = text.replace(new RegExp(`\\b${keyword}\\b`, 'gi'), keyword.toUpperCase());
-      });
-      
-      const escapedText = escapeFFmpegText(text);
-      const yPosition = 'h*0.82'; // Bottom area for subtitles
-      
-      filters.push(
-        `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=0x${fontColor}:borderw=2:bordercolor=black:x=(w-text_w)/2:y=${yPosition}:enable='between(t,${caption.start.toFixed(2)},${caption.end.toFixed(2)})'`
-      );
-    });
-    
-    return filters.join(',');
-  };
-
-  // Escape text for FFmpeg drawtext filter
-  const escapeFFmpegText = (text: string): string => {
-    return text
-      .replace(/\\/g, '\\\\')
-      .replace(/'/g, "'\\''")
-      .replace(/:/g, '\\:')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]')
-      .replace(/%/g, '\\%');
+  const shouldRetryEngine = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /aborted\(\)/i.test(msg) || /exit code\s*1/i.test(msg) || /ffmpeg falhou com código 1/i.test(msg);
   };
 
   // Calculate clip timings with highlight-first logic
@@ -345,7 +298,9 @@ export function useFFmpegWorker() {
         const clipDuration = endTime - startTime;
         const outputName = `clip_${i + 1}.mp4`;
 
-        // 2. Generate smart captions if enabled
+        const captionsRequired = Boolean(config.enableCaptions);
+
+        // 2. Generate smart captions if enabled (or if captionsRequired, we still generate fallback)
         let captionResult: SmartCaptionResult | null = null;
         if (smartCaptionConfig?.enabled) {
           setProgress(p => ({
@@ -372,44 +327,102 @@ export function useFFmpegWorker() {
           stageMessage: `Processando corte ${i + 1}/${count}...`
         }));
 
-        // 3. Build filter chain
-        let filterChain = 'crop=ih*(9/16):ih:(iw-ih*(9/16))/2:0,scale=1080:1920';
-        
-        // Add caption overlay if we have captions
-        if (captionResult && smartCaptionConfig) {
-          const captionFilter = buildCaptionFilter(
-            captionResult.captions,
-            captionResult.rehook,
-            smartCaptionConfig
-          );
-          if (captionFilter) {
-            filterChain += ',' + captionFilter;
+        // 3. Render captions with multi-strategy fallback (A->B->C)
+        setProgress(p => ({
+          ...p,
+          currentClip: i + 1,
+          totalClips: count,
+          stage: 'applying-filters',
+          stageMessage: `Aplicando legendas/filtros (${i + 1}/${count})...`
+        }));
+
+        const baseVideoFilter = 'crop=ih*(9/16):ih:(iw-ih*(9/16))/2:0,scale=1080:1920';
+        const captionCfg = smartCaptionConfig;
+        const captionInput = {
+          duration: clipDuration,
+          position: captionCfg?.captionPosition ?? 'bottom',
+          primaryColorHex: captionCfg?.primaryColor ?? '#FFFFFF',
+          highlightColorHex: captionCfg?.secondaryColor,
+          hookText: captionCfg?.enableRehook ? (captionResult?.rehook?.text ?? null) : null,
+          segments: (captionResult?.captions ?? []).map(c => ({
+            text: c.text,
+            start: c.start,
+            end: c.end,
+          })),
+        } as const;
+
+        const videoEncodeArgs = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23'];
+        const audioEncodeArgs = ['-c:a', 'aac', '-b:a', '128k'];
+
+        const runEncode = async () => {
+          const ff = ffmpegRef.current!;
+          if (!captionsRequired) {
+            // If captions are not required, we still try to include them when available, but we won't block on it.
+            try {
+              const { usedStrategy } = await renderCaptionsWithFallback({
+                ffmpeg: ff,
+                inputFile: 'input.mp4',
+                outputFile: outputName,
+                startTime,
+                duration: clipDuration,
+                baseVideoFilter,
+                videoEncodeArgs,
+                audioMapArgs: audioEncodeArgs,
+                captions: captionInput,
+                captionsRequired: false,
+              });
+              console.log('[Captions] Non-mandatory captions used strategy:', usedStrategy);
+              return;
+            } catch (e) {
+              console.warn('[Captions] Non-mandatory caption render failed; encoding without captions.', e);
+              const exitCode = await ff.exec([
+                '-ss', startTime.toFixed(2),
+                '-i', 'input.mp4',
+                '-t', clipDuration.toFixed(2),
+                '-vf', baseVideoFilter,
+                '-map_metadata', '-1',
+                ...videoEncodeArgs,
+                ...audioEncodeArgs,
+                '-y',
+                outputName
+              ]);
+              if (exitCode !== 0) throw new Error(`FFmpeg falhou com código ${exitCode}`);
+              return;
+            }
+          }
+
+          // Captions are mandatory
+          const { usedStrategy } = await renderCaptionsWithFallback({
+            ffmpeg: ff,
+            inputFile: 'input.mp4',
+            outputFile: outputName,
+            startTime,
+            duration: clipDuration,
+            baseVideoFilter,
+            videoEncodeArgs,
+            audioMapArgs: audioEncodeArgs,
+            captions: captionInput,
+            captionsRequired: true,
+          });
+          console.log('[Captions] Captions rendered with strategy:', usedStrategy);
+        };
+
+        try {
+          await runEncode();
+        } catch (e) {
+          console.warn('[FFmpegWorker] Encoding failed (will check for engine retry)...', e);
+          if (shouldRetryEngine(e)) {
+            console.warn('[FFmpegWorker] Detected aborted/exitCode=1. Recarregando engine e tentando novamente...');
+            setLoaded(false);
+            await load({ force: true });
+            await runEncode();
+          } else {
+            throw e;
           }
         }
 
-        // 4. Execute FFmpeg with captions
-        const exitCode = await ffmpeg.exec([
-          '-ss', startTime.toFixed(2),
-          '-i', 'input.mp4',
-          '-t', clipDuration.toFixed(2),
-          '-vf', filterChain,
-          '-map_metadata', '-1',
-          '-c:v', 'libx264',
-          '-pix_fmt', 'yuv420p',
-          '-preset', 'ultrafast',
-          '-crf', '23',
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-y',
-          outputName
-        ]);
-
-        if (exitCode !== 0) {
-          throw new Error(`FFmpeg falhou com código ${exitCode}`);
-        }
-
         // 5. Read and create blob
-        const data = await ffmpeg.readFile(outputName);
+        const data = await ffmpegRef.current!.readFile(outputName);
         const uint8Array = new Uint8Array(data as any);
         const blob = new Blob([uint8Array.buffer], { type: 'video/mp4' });
         const url = URL.createObjectURL(blob);
@@ -432,10 +445,10 @@ export function useFFmpegWorker() {
         setClips(prev => [...prev, clip]);
         
         // Cleanup clip file
-        await ffmpeg.deleteFile(outputName);
+        await ffmpegRef.current!.deleteFile(outputName);
       }
 
-      await ffmpeg.deleteFile('input.mp4');
+      await ffmpegRef.current!.deleteFile('input.mp4');
       
       setProgress(p => ({ ...p, stage: 'complete', stageMessage: 'Concluído!' }));
       return processedClips;
