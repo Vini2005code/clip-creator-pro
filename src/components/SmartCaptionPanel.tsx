@@ -3,8 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Type, 
   Languages, 
-  Sparkles, 
-  Target,
   Palette,
   Info,
   Wand2
@@ -21,12 +19,6 @@ interface SmartCaptionPanelProps {
 const LANGUAGES = [
   { value: 'pt', label: 'Português', flag: '🇧🇷' },
   { value: 'en', label: 'English', flag: '🇺🇸' },
-] as const;
-
-const REHOOK_STYLES = [
-  { value: 'curiosity', label: 'Curiosidade', emoji: '🤔', desc: '"Você não vai acreditar..."' },
-  { value: 'conflict', label: 'Conflito', emoji: '⚡', desc: '"O problema é que..."' },
-  { value: 'promise', label: 'Promessa', emoji: '✨', desc: '"Isso vai mudar..."' },
 ] as const;
 
 const CAPTION_STYLES = [
@@ -65,8 +57,8 @@ export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelPro
                 <Wand2 className="w-5 h-5 text-primary" />
               </div>
               <div>
-                <h3 className="font-semibold text-foreground">Smart Caption & Rehook</h3>
-                <p className="text-xs text-muted-foreground">Legendas inteligentes com IA</p>
+                <h3 className="font-semibold text-foreground">Legendas Automáticas (ASR)</h3>
+                <p className="text-xs text-muted-foreground">Transcrição fiel do áudio real</p>
               </div>
             </div>
             <Switch
@@ -91,8 +83,8 @@ export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelPro
                     <Languages className="w-5 h-5 text-primary" />
                   </div>
                   <div>
-                    <h3 className="font-semibold text-foreground">Idioma das Legendas</h3>
-                    <p className="text-xs text-muted-foreground">Reescrita natural, não tradução literal</p>
+                    <h3 className="font-semibold text-foreground">Idioma da Transcrição</h3>
+                    <p className="text-xs text-muted-foreground">Transcrição no idioma original do áudio</p>
                   </div>
                 </div>
 
@@ -116,74 +108,6 @@ export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelPro
                 </div>
               </div>
 
-              {/* Auto-Rehook */}
-              <div className="p-5 rounded-2xl glass gradient-border space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-xl bg-accent/20">
-                      <Sparkles className="w-5 h-5 text-accent" />
-                    </div>
-                    <div>
-                      <h3 className="font-semibold text-foreground">Auto-Rehook</h3>
-                      <p className="text-xs text-muted-foreground">Hook textual nos primeiros 0.5-1s</p>
-                    </div>
-                  </div>
-                  <Switch
-                    checked={config.enableRehook}
-                    onCheckedChange={(checked) => onConfigChange({ enableRehook: checked })}
-                  />
-                </div>
-
-                {config.enableRehook && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    className="space-y-3"
-                  >
-                    <Label className="text-xs text-muted-foreground">Estilo do Hook</Label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {REHOOK_STYLES.map((style) => (
-                        <motion.button
-                          key={style.value}
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          onClick={() => onConfigChange({ rehookStyle: style.value })}
-                          className={`py-2 px-2 rounded-xl text-xs font-medium transition-all flex flex-col items-center gap-1 ${
-                            config.rehookStyle === style.value
-                              ? 'bg-accent text-accent-foreground'
-                              : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
-                          }`}
-                        >
-                          <span className="text-base">{style.emoji}</span>
-                          <span>{style.label}</span>
-                        </motion.button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground/70 text-center">
-                      {REHOOK_STYLES.find(s => s.value === config.rehookStyle)?.desc}
-                    </p>
-                  </motion.div>
-                )}
-              </div>
-
-              {/* Retention-Aware Adjustment */}
-              <div className="p-5 rounded-2xl glass gradient-border">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-xl bg-success/20">
-                      <Target className="w-5 h-5 text-success" />
-                    </div>
-                    <div>
-                      <h3 className="font-semibold text-foreground">Ajuste de Retenção</h3>
-                      <p className="text-xs text-muted-foreground">Otimiza início/fim para loop (20-45s)</p>
-                    </div>
-                  </div>
-                  <Switch
-                    checked={config.retentionAdjust}
-                    onCheckedChange={(checked) => onConfigChange({ retentionAdjust: checked })}
-                  />
-                </div>
-              </div>
 
               {/* Visual Style */}
               <div className="p-5 rounded-2xl glass gradient-border space-y-4">
@@ -303,23 +227,23 @@ export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelPro
                 <div className="flex gap-3">
                   <Info className="w-5 h-5 text-primary shrink-0 mt-0.5" />
                   <div>
-                    <p className="font-medium text-foreground text-sm mb-1">Como funciona</p>
+                    <p className="font-medium text-foreground text-sm mb-1">Transcrição ASR</p>
                     <ul className="text-xs text-muted-foreground space-y-1">
                       <li className="flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-primary" />
-                        IA transcreve e analisa semanticamente o áudio
+                        Transcrição fiel: palavra por palavra do áudio
                       </li>
                       <li className="flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-                        Quebra frases por impacto, não tempo
+                        Timestamps precisos por segmento de fala
                       </li>
                       <li className="flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-success" />
-                        Gera hook semântico conectado ao conteúdo
+                        Segmentação natural por pausas e respiração
                       </li>
                       <li className="flex items-center gap-2">
                         <span className="w-1.5 h-1.5 rounded-full bg-warning" />
-                        Ajusta corte para máxima retenção e loop
+                        Zero criatividade: sem resumo ou reescrita
                       </li>
                     </ul>
                   </div>

@@ -244,17 +244,22 @@ export const renderCaptionsWithFallback = async (params: {
   const normalized = normalizeCaptionSegments(params.captions.segments, duration);
   const hadAnyCaptions = Boolean(params.captions.hookText) || normalized.length > 0;
 
-  // If captions are required, enforce at least a visible fallback text.
+  // ASR-only mode: No fake captions ever
+  // If no real transcription, segments will be empty
   const hookText = stripInvalidChars(params.captions.hookText || "");
   const segments = normalized;
-  const fallbackSegments: CaptionSegment[] = segments.length
-    ? segments
-    : [{ text: "LEGENDAS ATIVAS", start: 0, end: Math.min(2.5, duration) }];
+
+  // CRITICAL: If captionsRequired but no segments, this means ASR found no speech
+  // We do NOT generate fake "LEGENDAS ATIVAS" text - that violates ASR integrity
+  // Instead, we render without captions and log the situation
+  if (params.captionsRequired && segments.length === 0 && !hookText) {
+    console.warn("[Captions] Captions required but no ASR transcription available - encoding without captions");
+  }
 
   const captionInput: CaptionRenderInput = {
     ...params.captions,
     hookText: hookText || null,
-    segments: params.captionsRequired ? fallbackSegments : segments,
+    segments: segments, // Use only real ASR segments, never fake ones
   };
 
   await ensureFontInFS(ffmpeg);
@@ -344,12 +349,9 @@ export const renderCaptionsWithFallback = async (params: {
       await ffmpeg.writeFile(`ov_${i}.png`, png);
     }
 
-    // Absolute fallback if still empty (captionsRequired)
-    if (params.captionsRequired && overlays.length === 0) {
-      overlays.push({ file: "ov_fallback.png", start: 0, end: Math.min(2.5, duration) });
-      const png = await renderOverlayPng("LEGENDAS ATIVAS", captionInput.position, primary, highlight);
-      await ffmpeg.writeFile("ov_fallback.png", png);
-    }
+    // REMOVED: No fake fallback overlays
+    // ASR integrity: if no transcription, no captions
+    // This is expected behavior - silent clips have no captions
 
     const inputs: string[] = [];
     for (const ov of overlays) {
@@ -397,36 +399,9 @@ export const renderCaptionsWithFallback = async (params: {
     console.warn("[Captions] Strategy C failed:", e);
   }
 
-  // Last-resort: single overlay for whole clip (still no drawtext)
-  if (params.captionsRequired) {
-    console.warn("[Captions] Falling back to C_overlay_fallback (single overlay).");
-    const png = await renderOverlayPng(
-      "LEGENDAS ATIVAS",
-      params.captions.position,
-      params.captions.primaryColorHex || "#FFFFFF",
-      params.captions.highlightColorHex,
-    );
-    await ffmpeg.writeFile("ov_fallback_full.png", png);
-    const args = [
-      ...common,
-      "-i",
-      "ov_fallback_full.png",
-      "-filter_complex",
-      `[0:v]${params.baseVideoFilter}[v0];[v0][1:v]overlay=0:0:format=auto:enable='between(t,0,${duration.toFixed(
-        2,
-      )})'[v1]`,
-      "-map",
-      "[v1]",
-      "-map",
-      "0:a?",
-      ...params.videoEncodeArgs,
-      ...params.audioMapArgs,
-      "-y",
-      outputFile,
-    ];
-    const exitCode = await tryExec(ffmpeg, args);
-    if (exitCode === 0) return { usedStrategy: "C_overlay_fallback", hadAnyCaptions };
-  }
+  // REMOVED: Last-resort fake overlay
+  // ASR integrity: we never generate fake "LEGENDAS ATIVAS" text
+  // If no speech was detected, the video has no captions - this is correct behavior
 
   // If captions aren't required, allow completion without them.
   throw new Error("Caption rendering failed for all strategies");

@@ -85,98 +85,134 @@ export function useFFmpegWorker() {
     }
   }, [loaded, loading]);
 
-  // Generate smart captions via edge function
-  const generateSmartCaptions = async (
+  /**
+   * Generate captions using ASR transcription
+   * CRITICAL: Only real speech transcription - no creative text generation
+   */
+  const generateASRCaptions = async (
+    videoFile: File,
     clipStart: number,
     clipEnd: number,
-    config: SmartCaptionConfig,
-    transcript?: string
+    config: SmartCaptionConfig
   ): Promise<SmartCaptionResult | null> => {
     if (!config.enabled) {
-      console.log('[FFmpegWorker] Smart captions disabled, skipping...');
+      console.log('[FFmpegWorker] Captions disabled, skipping...');
       return null;
     }
 
-    const clipDuration = clipEnd - clipStart;
-
     try {
-      console.log('[FFmpegWorker] Generating smart captions...', { clipStart, clipEnd, config });
+      console.log('[FFmpegWorker] Starting ASR transcription...', { clipStart, clipEnd });
       
-      const { data, error } = await supabase.functions.invoke('smart-caption', {
+      // Read the video file as base64 for transcription
+      const arrayBuffer = await videoFile.arrayBuffer();
+      const base64Audio = btoa(
+        new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+      );
+
+      // Call ASR transcription edge function
+      const { data, error } = await supabase.functions.invoke('transcribe-audio', {
         body: {
-          transcript: transcript || `Conteúdo viral do momento ${clipStart.toFixed(1)}s até ${clipEnd.toFixed(1)}s`,
-          startTime: clipStart,
-          endTime: clipEnd,
-          outputLanguage: config.outputLanguage,
-          enableRehook: config.enableRehook,
-          rehookStyle: config.rehookStyle,
-          retentionAdjust: config.retentionAdjust,
+          audio: base64Audio,
+          language: config.outputLanguage === 'pt' ? 'pt' : config.outputLanguage === 'en' ? 'en' : 'auto',
         }
       });
 
       if (error) {
-        console.error('[FFmpegWorker] Smart caption API error:', error);
-        // Return fallback captions instead of null
-        return createFallbackCaptions(clipDuration, config);
+        console.error('[FFmpegWorker] ASR API error:', error);
+        return null; // No fake captions
       }
 
-      // Validate response has required data
-      if (!data || (!data.captions?.length && !data.rehook)) {
-        console.warn('[FFmpegWorker] Invalid caption response, using fallback');
-        return createFallbackCaptions(clipDuration, config);
+      if (!data.success || !data.transcription) {
+        console.warn('[FFmpegWorker] No speech detected in audio');
+        return null; // No fake captions
       }
 
-      console.log('[FFmpegWorker] Smart captions generated:', data);
-      return data;
+      // Segment the transcription into caption chunks
+      const words: { word: string; start: number; end: number; confidence: number }[] = data.words || [];
+      
+      // Create caption segments from words using natural breaks
+      const segments = segmentWordsIntoCaptions(words, clipEnd - clipStart);
+      
+      console.log('[FFmpegWorker] ASR captions generated:', {
+        wordCount: words.length,
+        segmentCount: segments.length,
+        transcription: data.transcription.substring(0, 100),
+      });
+
+      return {
+        transcription: data.transcription,
+        words: words,
+        captions: segments,
+        rehook: null, // No creative hooks - ASR only
+        suggestedStartTime: clipStart,
+        suggestedEndTime: clipEnd,
+      };
+
     } catch (err) {
-      console.error('[FFmpegWorker] Failed to generate smart captions:', err);
-      // Return fallback captions on error
-      return createFallbackCaptions(clipDuration, config);
+      console.error('[FFmpegWorker] Failed to transcribe audio:', err);
+      return null; // NEVER generate fake captions
     }
   };
 
-  // Create fallback captions when API fails
-  const createFallbackCaptions = (
-    duration: number,
-    config: SmartCaptionConfig
-  ): SmartCaptionResult => {
-    const isPortuguese = config.outputLanguage === 'pt';
-    
-    const hooks = {
-      curiosity: isPortuguese ? 'VOCÊ NÃO VAI ACREDITAR...' : 'YOU WON\'T BELIEVE...',
-      conflict: isPortuguese ? 'ISSO MUDOU TUDO!' : 'THIS CHANGED EVERYTHING!',
-      promise: isPortuguese ? 'ASSISTA ATÉ O FINAL' : 'WATCH UNTIL THE END',
-    };
+  /**
+   * Segment words into caption chunks using natural speech patterns
+   */
+  const segmentWordsIntoCaptions = (
+    words: { word: string; start: number; end: number; confidence: number }[],
+    clipDuration: number
+  ): SmartCaptionResult['captions'] => {
+    if (!words || words.length === 0) return [];
 
-    const segmentDuration = Math.min(3, duration / 3);
-    const captions: SmartCaptionResult['captions'] = [];
+    const maxWordsPerSegment = 6;
+    const maxSegmentDuration = 3.0;
+    const segments: SmartCaptionResult['captions'] = [];
     
-    // Generate timed caption segments
-    for (let i = 0; i < Math.floor(duration / segmentDuration); i++) {
-      const start = 1.5 + (i * segmentDuration);
-      const end = Math.min(start + segmentDuration, duration);
-      if (end <= start) break;
+    let currentWords: typeof words = [];
+    let segmentStart = words[0]?.start || 0;
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const nextWord = words[i + 1];
       
-      captions.push({
-        text: isPortuguese ? `Parte ${i + 1}` : `Part ${i + 1}`,
-        start,
-        end,
-        keywords: [],
-        isHook: false,
-      });
+      currentWords.push(word);
+
+      const segmentDuration = word.end - segmentStart;
+      const wordCount = currentWords.length;
+      
+      // Break conditions based on natural speech
+      const hasMaxWords = wordCount >= maxWordsPerSegment;
+      const hasPause = nextWord && (nextWord.start - word.end) > 0.5;
+      const hasMaxDuration = segmentDuration >= maxSegmentDuration;
+      const hasSentenceEnd = /[.!?]$/.test(word.word);
+      const isLastWord = i === words.length - 1;
+
+      if (hasMaxWords || hasPause || hasMaxDuration || hasSentenceEnd || isLastWord) {
+        const text = currentWords.map(w => w.word).join(' ').trim();
+        
+        if (text) {
+          // Clamp timestamps to clip duration
+          const start = Math.max(0, Math.min(segmentStart, clipDuration));
+          const end = Math.max(0, Math.min(word.end, clipDuration));
+          
+          if (end > start) {
+            segments.push({
+              text,
+              start,
+              end,
+              keywords: [], // No AI-generated keywords
+              isHook: false,
+            });
+          }
+        }
+
+        currentWords = [];
+        if (nextWord) {
+          segmentStart = nextWord.start;
+        }
+      }
     }
 
-    return {
-      transcription: '',
-      words: [],
-      captions,
-      rehook: config.enableRehook ? {
-        text: hooks[config.rehookStyle],
-        style: config.rehookStyle,
-      } : null,
-      suggestedStartTime: 0,
-      suggestedEndTime: duration,
-    };
+    return segments;
   };
 
   const shouldRetryEngine = (err: unknown) => {
@@ -300,7 +336,7 @@ export function useFFmpegWorker() {
 
         const captionsRequired = Boolean(config.enableCaptions);
 
-        // 2. Generate smart captions if enabled (or if captionsRequired, we still generate fallback)
+        // 2. Generate captions from ASR (real speech only - no fake text)
         let captionResult: SmartCaptionResult | null = null;
         if (smartCaptionConfig?.enabled) {
           setProgress(p => ({
@@ -308,15 +344,22 @@ export function useFFmpegWorker() {
             currentClip: i + 1,
             totalClips: count,
             stage: 'generating-captions',
-            stageMessage: `Gerando legendas IA (${i + 1}/${count})...`
+            stageMessage: `Transcrevendo áudio (${i + 1}/${count})...`
           }));
           
-          captionResult = await generateSmartCaptions(
+          // Use ASR to get real transcription
+          captionResult = await generateASRCaptions(
+            file,
             startTime,
             endTime,
-            smartCaptionConfig,
-            peakIntensity ? `Momento de alta energia (${Math.round(peakIntensity * 100)}% intensidade)` : undefined
+            smartCaptionConfig
           );
+          
+          // If no speech detected, captionResult will be null
+          // We do NOT generate fake captions
+          if (!captionResult) {
+            console.warn(`[FFmpegWorker] No speech detected in clip ${i + 1}`);
+          }
         }
 
         setProgress(p => ({
