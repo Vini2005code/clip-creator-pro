@@ -35,6 +35,12 @@ const CAPTION_STYLES = [
   { value: 'minimal', label: 'Minimal', preview: 'font-medium' },
 ] as const;
 
+const CAPTION_POSITIONS = [
+  { value: 'top', label: 'Topo' },
+  { value: 'center', label: 'Centro' },
+  { value: 'bottom', label: 'Rodapé' },
+] as const;
+
 const COLOR_PRESETS = [
   { primary: '#FFFFFF', secondary: '#FFD700', name: 'Dourado' },
   { primary: '#FFFFFF', secondary: '#00FF88', name: 'Neon' },
@@ -208,6 +214,28 @@ export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelPro
                         }`}
                       >
                         <span className={style.preview}>{style.label}</span>
+                      </motion.button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Caption Position */}
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Posição da legenda</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {CAPTION_POSITIONS.map((pos) => (
+                      <motion.button
+                        key={pos.value}
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => onConfigChange({ captionPosition: pos.value })}
+                        className={`py-3 rounded-xl transition-all text-xs font-medium ${
+                          config.captionPosition === pos.value
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-secondary text-secondary-foreground hover:bg-secondary/80'
+                        }`}
+                      >
+                        {pos.label}
                       </motion.button>
                     ))}
                   </div>
