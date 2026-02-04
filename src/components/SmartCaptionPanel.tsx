@@ -5,15 +5,19 @@ import {
   Languages, 
   Palette,
   Info,
-  Wand2
+  Wand2,
+  Eye
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
 import { SmartCaptionConfig } from '@/hooks/useSmartCaption';
 
 interface SmartCaptionPanelProps {
   config: SmartCaptionConfig;
   onConfigChange: (updates: Partial<SmartCaptionConfig>) => void;
+  onPreviewClick?: () => void;
+  previewLoading?: boolean;
 }
 
 const LANGUAGES = [
@@ -41,7 +45,7 @@ const COLOR_PRESETS = [
 ];
 
 export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelProps>(
-  function SmartCaptionPanel({ config, onConfigChange }, ref) {
+  function SmartCaptionPanel({ config, onConfigChange, onPreviewClick, previewLoading }, ref) {
     return (
       <motion.div
         ref={ref}
@@ -213,6 +217,23 @@ export const SmartCaptionPanel = forwardRef<HTMLDivElement, SmartCaptionPanelPro
                     Isso vai mudar{' '}
                     <span style={{ color: config.secondaryColor }}>TUDO</span>
                     {' '}que você sabe
+                  </p>
+                </div>
+
+                {/* Live preview (no export) */}
+                <div className="pt-1">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="w-full gap-2"
+                    disabled={!onPreviewClick || Boolean(previewLoading)}
+                    onClick={onPreviewClick}
+                  >
+                    <Eye className="w-4 h-4" />
+                    {previewLoading ? 'Gerando preview...' : 'Preview de legendas'}
+                  </Button>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Renderiza 2–3 linhas sobre o player (sem exportar) para validar posição/cores.
                   </p>
                 </div>
               </div>

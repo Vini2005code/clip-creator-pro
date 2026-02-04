@@ -4,6 +4,7 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { supabase } from '@/integrations/supabase/client';
 import { SmartCaptionConfig, SmartCaptionResult } from './useSmartCaption';
 import { renderCaptionsWithFallback } from '@/lib/ffmpeg/captionPipeline';
+import { segmentTranscription, type WordTimestamp } from './useASRTranscription';
 
 export interface CutConfig {
   duration: number;
@@ -85,15 +86,106 @@ export function useFFmpegWorker() {
     }
   }, [loaded, loading]);
 
+  const blobToBase64 = async (blob: Blob): Promise<string> => {
+    const arrayBuffer = await blob.arrayBuffer();
+    return btoa(
+      new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+    );
+  };
+
+  /**
+   * Extract a small WAV preview from the input video via FFmpeg (WASM-compatible).
+   * This avoids sending MP4 bytes to ASR and makes transcription deterministic.
+   */
+  const extractWavPreview = async (opts: {
+    inputFile: string;
+    startTime: number;
+    duration: number;
+  }): Promise<Blob> => {
+    const ff = ffmpegRef.current;
+    if (!ff) throw new Error('FFmpeg not initialized');
+
+    const outName = 'asr_preview.wav';
+    // 16kHz mono PCM WAV is widely compatible.
+    const exitCode = await ff.exec([
+      '-ss', opts.startTime.toFixed(2),
+      '-i', opts.inputFile,
+      '-t', opts.duration.toFixed(2),
+      '-vn',
+      '-ac', '1',
+      '-ar', '16000',
+      '-f', 'wav',
+      '-y',
+      outName,
+    ]);
+    if (exitCode !== 0) throw new Error(`FFmpeg falhou ao extrair áudio (código ${exitCode})`);
+
+    const wavData = await ff.readFile(outName);
+    await ff.deleteFile(outName);
+    const uint8Array = new Uint8Array(wavData as any);
+    return new Blob([uint8Array.buffer], { type: 'audio/wav' });
+  };
+
+  /**
+   * Preview helper: transcribe a short snippet and return 2–3 caption lines
+   * (ASR-only; no texto inventado).
+   */
+  const generateCaptionPreview = useCallback(async (opts: {
+    file: File;
+    language: 'pt' | 'en' | 'auto';
+  }): Promise<{ lines: string[] } | null> => {
+    try {
+      if (!ffmpegRef.current) await load();
+      const ff = ffmpegRef.current!;
+
+      // Write input (isolated from the cutting pipeline)
+      const inputData = await fetchFile(opts.file);
+      await ff.writeFile('preview_input.mp4', inputData);
+
+      // 12s is enough to get 2–3 segments in most content
+      const wavBlob = await extractWavPreview({ inputFile: 'preview_input.mp4', startTime: 0, duration: 12 });
+      const base64Wav = await blobToBase64(wavBlob);
+
+      console.log('[CaptionPreview] Calling ASR...', { wavBytes: wavBlob.size, language: opts.language });
+      const { data, error } = await supabase.functions.invoke('transcribe-audio', {
+        body: { audio: base64Wav, language: opts.language },
+      });
+
+      await ff.deleteFile('preview_input.mp4');
+
+      if (error) {
+        console.error('[CaptionPreview] ASR invoke error:', error);
+        return null;
+      }
+      if (!data?.success) {
+        console.warn('[CaptionPreview] ASR returned failure:', data);
+        return null;
+      }
+
+      const words: WordTimestamp[] = Array.isArray(data.words) ? data.words : [];
+      const segments = segmentTranscription(words, 6, 3.0);
+      const lines = segments
+        .map(s => s.text.trim())
+        .filter(Boolean)
+        .slice(0, 3);
+
+      if (lines.length === 0) return null;
+      return { lines };
+    } catch (e) {
+      console.error('[CaptionPreview] Failed:', e);
+      return null;
+    }
+  }, [load]);
+
   /**
    * Generate captions using ASR transcription
    * CRITICAL: Only real speech transcription - no creative text generation
    */
   const generateASRCaptions = async (
-    videoFile: File,
     clipStart: number,
     clipEnd: number,
-    config: SmartCaptionConfig
+    config: SmartCaptionConfig,
+    inputFileName: string = 'input.mp4'
   ): Promise<SmartCaptionResult | null> => {
     if (!config.enabled) {
       console.log('[FFmpegWorker] Captions disabled, skipping...');
@@ -102,12 +194,16 @@ export function useFFmpegWorker() {
 
     try {
       console.log('[FFmpegWorker] Starting ASR transcription...', { clipStart, clipEnd });
-      
-      // Read the video file as base64 for transcription
-      const arrayBuffer = await videoFile.arrayBuffer();
-      const base64Audio = btoa(
-        new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      );
+
+      // IMPORTANT: Extract WAV audio via FFmpeg (WASM) before calling ASR.
+      // Sending MP4 bytes to ASR is unreliable and breaks transcription.
+      const clipDuration = Math.max(0.1, clipEnd - clipStart);
+      const wavBlob = await extractWavPreview({
+        inputFile: inputFileName,
+        startTime: clipStart,
+        duration: clipDuration,
+      });
+      const base64Audio = await blobToBase64(wavBlob);
 
       // Call ASR transcription edge function
       const { data, error } = await supabase.functions.invoke('transcribe-audio', {
@@ -122,7 +218,7 @@ export function useFFmpegWorker() {
         return null; // No fake captions
       }
 
-      if (!data.success || !data.transcription) {
+      if (!data.success || (!data.transcription && (!data.words || data.words.length === 0))) {
         console.warn('[FFmpegWorker] No speech detected in audio');
         return null; // No fake captions
       }
@@ -131,7 +227,7 @@ export function useFFmpegWorker() {
       const words: { word: string; start: number; end: number; confidence: number }[] = data.words || [];
       
       // Create caption segments from words using natural breaks
-      const segments = segmentWordsIntoCaptions(words, clipEnd - clipStart);
+      const segments = segmentWordsIntoCaptions(words, clipDuration);
       
       console.log('[FFmpegWorker] ASR captions generated:', {
         wordCount: words.length,
@@ -348,12 +444,12 @@ export function useFFmpegWorker() {
           }));
           
           // Use ASR to get real transcription
-          captionResult = await generateASRCaptions(
-            file,
-            startTime,
-            endTime,
-            smartCaptionConfig
-          );
+           captionResult = await generateASRCaptions(
+             startTime,
+             endTime,
+             smartCaptionConfig,
+             'input.mp4'
+           );
           
           // If no speech detected, captionResult will be null
           // We do NOT generate fake captions
@@ -522,6 +618,7 @@ export function useFFmpegWorker() {
     processing,
     progress,
     clips,
+    generateCaptionPreview,
     processVideo,
     abort,
     reset

@@ -30,6 +30,9 @@ const Index = () => {
   const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
   const [config, setConfig] = useState<CutConfig>(DEFAULT_CONFIG);
   const [smartCaptionConfig, setSmartCaptionConfig] = useState<SmartCaptionConfig>(DEFAULT_SMART_CAPTION_CONFIG);
+  const [captionPreviewLines, setCaptionPreviewLines] = useState<string[]>([]);
+  const [captionPreviewEnabled, setCaptionPreviewEnabled] = useState(false);
+  const [captionPreviewLoading, setCaptionPreviewLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const videoPreviewRef = useRef<VideoPreviewEnhancedRef>(null);
 
@@ -40,6 +43,7 @@ const Index = () => {
     processing,
     progress,
     clips,
+    generateCaptionPreview,
     processVideo,
     abort,
     reset,
@@ -57,6 +61,8 @@ const Index = () => {
     setVideoDuration(0); // Reset to force re-detection
     setVideoDimensions({ width: 0, height: 0 });
     setError(null);
+    setCaptionPreviewEnabled(false);
+    setCaptionPreviewLines([]);
     reset();
     audioAnalyzer.reset();
   }, [reset, audioAnalyzer]);
@@ -66,6 +72,8 @@ const Index = () => {
     setVideoDuration(0);
     setVideoDimensions({ width: 0, height: 0 });
     setError(null);
+    setCaptionPreviewEnabled(false);
+    setCaptionPreviewLines([]);
     reset();
     audioAnalyzer.reset();
   }, [reset, audioAnalyzer]);
@@ -92,6 +100,42 @@ const Index = () => {
   const handleSmartCaptionChange = useCallback((updates: Partial<SmartCaptionConfig>) => {
     setSmartCaptionConfig(prev => ({ ...prev, ...updates }));
   }, []);
+
+  const handleToggleCaptionPreview = useCallback(async () => {
+    if (!selectedFile) return;
+    if (!smartCaptionConfig.enabled) return;
+
+    // Toggle off if already enabled
+    if (captionPreviewEnabled) {
+      setCaptionPreviewEnabled(false);
+      return;
+    }
+
+    setCaptionPreviewLoading(true);
+    try {
+      const res = await generateCaptionPreview({
+        file: selectedFile,
+        language: smartCaptionConfig.outputLanguage,
+      });
+
+      if (!res || res.lines.length === 0) {
+        setError('Não foi possível gerar preview de legendas (sem fala detectada ou erro de ASR).');
+        setCaptionPreviewEnabled(false);
+        setCaptionPreviewLines([]);
+        return;
+      }
+
+      setCaptionPreviewLines(res.lines);
+      setCaptionPreviewEnabled(true);
+    } catch (e) {
+      console.error('[Index] Caption preview failed:', e);
+      setError('Erro ao gerar preview de legendas.');
+      setCaptionPreviewEnabled(false);
+      setCaptionPreviewLines([]);
+    } finally {
+      setCaptionPreviewLoading(false);
+    }
+  }, [selectedFile, smartCaptionConfig.enabled, smartCaptionConfig.outputLanguage, captionPreviewEnabled, generateCaptionPreview]);
 
   const handleAnalyzeAudio = useCallback(async () => {
     if (!selectedFile) return;
@@ -191,6 +235,14 @@ const Index = () => {
                     file={selectedFile}
                     onDurationChange={handleDurationChange}
                     onDimensionsChange={handleDimensionsChange}
+                    captionPreview={{
+                      enabled: captionPreviewEnabled,
+                      lines: captionPreviewLines,
+                      position: smartCaptionConfig.captionPosition,
+                      primaryColor: smartCaptionConfig.primaryColor,
+                      secondaryColor: smartCaptionConfig.secondaryColor,
+                      style: smartCaptionConfig.captionStyle,
+                    }}
                   />
                 </motion.div>
               )}
@@ -234,6 +286,8 @@ const Index = () => {
                   <SmartCaptionPanel
                     config={smartCaptionConfig}
                     onConfigChange={handleSmartCaptionChange}
+                    onPreviewClick={handleToggleCaptionPreview}
+                    previewLoading={captionPreviewLoading}
                   />
 
                   {/* Process button */}

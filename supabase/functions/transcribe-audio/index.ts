@@ -50,8 +50,8 @@ serve(async (req) => {
     console.log("[TranscribeAudio] Audio length:", audio.length, "bytes (base64)");
     console.log("[TranscribeAudio] Language:", language);
 
-    // Use Lovable AI Gateway for Whisper-based transcription
-    // We'll use Gemini's audio understanding capabilities for accurate ASR
+    // Use Lovable AI Gateway for ASR.
+    // IMPORTANT: send audio as multimodal input_audio (OpenAI-compatible format).
     const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -100,9 +100,10 @@ If no speech is detected, return:
                 text: `Transcribe this audio clip exactly as spoken. Return ONLY valid JSON.${language !== "auto" ? ` Expected language: ${language}.` : ""}`
               },
               {
-                type: "image_url",
-                image_url: {
-                  url: `data:audio/wav;base64,${audio}`
+                type: "input_audio",
+                input_audio: {
+                  data: audio,
+                  format: "wav"
                 }
               }
             ]
