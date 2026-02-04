@@ -6,6 +6,14 @@ interface VideoPreviewEnhancedProps {
   file: File;
   onDurationChange: (duration: number) => void;
   onDimensionsChange: (width: number, height: number) => void;
+  captionPreview?: {
+    enabled: boolean;
+    lines: string[];
+    position: 'top' | 'center' | 'bottom';
+    primaryColor: string;
+    secondaryColor: string;
+    style: 'modern' | 'bold' | 'minimal';
+  };
 }
 
 export interface VideoPreviewEnhancedRef {
@@ -13,7 +21,7 @@ export interface VideoPreviewEnhancedRef {
 }
 
 export const VideoPreviewEnhanced = forwardRef<VideoPreviewEnhancedRef, VideoPreviewEnhancedProps>(
-  ({ file, onDurationChange, onDimensionsChange }, ref) => {
+  ({ file, onDurationChange, onDimensionsChange, captionPreview }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isMuted, setIsMuted] = useState(true);
@@ -182,6 +190,57 @@ export const VideoPreviewEnhanced = forwardRef<VideoPreviewEnhancedRef, VideoPre
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
               />
+            )}
+
+            {/* Caption preview overlay (no export) */}
+            {captionPreview?.enabled && captionPreview.lines.length > 0 && (
+              <div className="absolute inset-0 pointer-events-none">
+                <div
+                  className="absolute left-1/2 -translate-x-1/2 w-[92%] max-w-[680px] px-3"
+                  style={{
+                    top: captionPreview.position === 'top' ? '8%' : undefined,
+                    bottom: captionPreview.position === 'bottom' ? '10%' : undefined,
+                    transform:
+                      captionPreview.position === 'center'
+                        ? 'translate(-50%, -50%)'
+                        : undefined,
+                    left: '50%',
+                    ...(captionPreview.position === 'center' ? { top: '50%' } : {}),
+                  }}
+                >
+                  <div className="space-y-2">
+                    {captionPreview.lines.slice(0, 3).map((line, idx) => {
+                      const words = line.trim().split(/\s+/);
+                      const last = words.pop();
+                      const head = words.join(' ');
+                      const className =
+                        captionPreview.style === 'bold'
+                          ? 'font-black uppercase'
+                          : captionPreview.style === 'minimal'
+                            ? 'font-medium'
+                            : 'font-bold tracking-wide';
+
+                      return (
+                        <div
+                          key={`${idx}-${line}`}
+                          className={`text-center leading-tight drop-shadow-[0_2px_12px_rgba(0,0,0,0.55)] ${className}`}
+                          style={{
+                            color: captionPreview.primaryColor,
+                            fontSize: 'clamp(18px, 3.2vw, 44px)',
+                            textShadow:
+                              '0 2px 10px rgba(0,0,0,0.75), 0 0 2px rgba(0,0,0,0.75)',
+                          }}
+                        >
+                          {head ? <span>{head} </span> : null}
+                          {last ? (
+                            <span style={{ color: captionPreview.secondaryColor }}>{last}</span>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
             )}
             
             {/* Loading indicator */}
