@@ -199,6 +199,10 @@ function estimateWordTimestamps(
 function isValidTranscription(text: string): boolean {
   if (!text || text.length < 2) return false;
   
+  // Explicit check: if the entire text is just "json" (case insensitive), reject
+  const normalized = text.trim().toLowerCase();
+  if (normalized === 'json' || normalized === 'json.' || normalized === '"json"') return false;
+  
   // Must have at least some letters
   const letterCount = (text.match(/[\p{L}]/gu) || []).length;
   if (letterCount < 3) return false;
@@ -207,11 +211,20 @@ function isValidTranscription(text: string): boolean {
   const letterRatio = letterCount / text.length;
   if (letterRatio < 0.5) return false;
   
-  // Check for garbage patterns
-  if (/json|null|undefined|\[\s*\]|\{\s*\}/i.test(text)) return false;
+  // Check for garbage patterns - whole text is garbage
+  if (/^(json|null|undefined|true|false)$/i.test(normalized)) return false;
+  
+  // Check if text is mostly garbage keywords
+  const garbagePattern = /\b(json|null|undefined|true|false|object|array|string|number|boolean)\b/gi;
+  const garbageMatches = text.match(garbagePattern) || [];
+  const wordCount = text.split(/\s+/).length;
+  if (garbageMatches.length > wordCount * 0.3) return false;
   
   // Check for repeated punctuation garbage
   if (/[,.\-_:;]{3,}/.test(text)) return false;
+  
+  // Check for JSON-like structures leaked into text
+  if (/\[\s*\]|\{\s*\}/.test(text)) return false;
   
   return true;
 }
@@ -220,54 +233,80 @@ function isValidTranscription(text: string): boolean {
  * Parse AI response to extract transcription and word timestamps.
  * Handles various response formats with robust fallbacks.
  */
+function extractJsonFromText(content: string): any | null {
+  // Strategy 1: Direct JSON parse (cleanest case)
+  try {
+    const trimmed = content.trim();
+    if (trimmed.startsWith('{')) {
+      return JSON.parse(trimmed);
+    }
+  } catch { /* continue */ }
+
+  // Strategy 2: Extract from markdown code blocks
+  const codeBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    try {
+      return JSON.parse(codeBlockMatch[1].trim());
+    } catch { /* continue */ }
+  }
+
+  // Strategy 3: Find the outermost JSON object using bracket matching
+  // This is the KEY fix - find the first '{' and match to its closing '}'
+  const firstBrace = content.indexOf('{');
+  if (firstBrace !== -1) {
+    let depth = 0;
+    let lastBrace = -1;
+    for (let i = firstBrace; i < content.length; i++) {
+      if (content[i] === '{') depth++;
+      else if (content[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          lastBrace = i;
+          break;
+        }
+      }
+    }
+    if (lastBrace !== -1) {
+      const candidate = content.substring(firstBrace, lastBrace + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        console.log("[TranscribeAudio] Bracket-matched JSON failed to parse, length:", candidate.length);
+      }
+    }
+  }
+
+  return null;
+}
+
 function parseAIResponse(
   content: string,
   audioDurationMs: number,
   requestedLanguage: string
 ): { transcription: string; words: WordTimestamp[]; language: string } {
   const maxDuration = audioDurationMs / 1000;
-  
-  // Try to extract JSON from the response
-  let parsed: any = null;
-  
-  // Method 1: Direct JSON parse
-  try {
-    parsed = JSON.parse(content.trim());
-  } catch {
-    // Method 2: Extract from markdown code blocks
-    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
-      try {
-        parsed = JSON.parse(jsonMatch[1].trim());
-      } catch { /* continue to fallback */ }
-    }
-    
-    // Method 3: Find JSON object in text
-    if (!parsed) {
-      const objectMatch = content.match(/\{[\s\S]*"transcription"[\s\S]*\}/);
-      if (objectMatch) {
-        try {
-          parsed = JSON.parse(objectMatch[0]);
-        } catch { /* continue to fallback */ }
-      }
-    }
-  }
-  
+
+  console.log("[TranscribeAudio] Parsing response, length:", content.length);
+
+  // Extract JSON using robust strategies
+  const parsed = extractJsonFromText(content);
+
   // If we got valid JSON with transcription
   if (parsed && typeof parsed.transcription === "string") {
     const rawTranscription = parsed.transcription.trim();
     const detectedLanguage = parsed.language || requestedLanguage;
     let words: WordTimestamp[] = [];
-    
+
+    console.log("[TranscribeAudio] Extracted transcription:", rawTranscription.substring(0, 120));
+
     // Validate transcription is real speech
     if (!isValidTranscription(rawTranscription)) {
       console.log("[TranscribeAudio] Invalid transcription detected, returning empty");
       return { transcription: "", words: [], language: detectedLanguage };
     }
-    
+
     // Process word timestamps if available
     if (Array.isArray(parsed.words) && parsed.words.length > 0) {
-      // Convert to proper format
       const rawWords: WordTimestamp[] = parsed.words
         .filter((w: any) => w && typeof w.word === "string")
         .map((w: any) => ({
@@ -276,13 +315,13 @@ function parseAIResponse(
           end: typeof w.end === "number" ? w.end : 0,
           confidence: typeof w.confidence === "number" ? w.confidence : 0.9,
         }));
-      
+
       // Post-process: remove invalid tokens, apply confidence threshold
       words = postProcessWords(rawWords);
-      
+
       // Validate timestamps
       words = validateTimestamps(words, maxDuration);
-      
+
       // If post-processing removed too many words, re-estimate
       if (words.length < rawWords.length * 0.3 && rawTranscription) {
         console.log("[TranscribeAudio] Too many words filtered, re-estimating timestamps");
@@ -292,32 +331,21 @@ function parseAIResponse(
       // No words array, estimate from transcription
       words = estimateWordTimestamps(rawTranscription, audioDurationMs);
     }
-    
+
     // Rebuild transcription from cleaned words
     const cleanedTranscription = words.map(w => w.word).join(' ');
-    
-    return { 
-      transcription: cleanedTranscription || rawTranscription, 
-      words, 
-      language: detectedLanguage 
-    };
-  }
-  
-  // Fallback: Extract plain text transcription
-  const plainText = content
-    .replace(/```[\s\S]*?```/g, "")
-    .replace(/\{[\s\S]*?\}/g, "")
-    .replace(/^[^a-zA-ZÀ-ÿ\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]+/, "")
-    .trim();
-  
-  if (plainText && isValidTranscription(plainText)) {
+
     return {
-      transcription: plainText,
-      words: estimateWordTimestamps(plainText, audioDurationMs),
-      language: requestedLanguage === "auto" ? "unknown" : requestedLanguage,
+      transcription: cleanedTranscription || rawTranscription,
+      words,
+      language: detectedLanguage
     };
   }
-  
+
+  // NO plainText fallback - if JSON extraction failed, return empty
+  // This prevents "json", "Here is your json", etc. from leaking as captions
+  console.log("[TranscribeAudio] Failed to extract valid JSON from AI response. Returning empty.");
+  console.log("[TranscribeAudio] Response preview:", content.substring(0, 300));
   return { transcription: "", words: [], language: requestedLanguage };
 }
 
@@ -382,74 +410,23 @@ serve(async (req) => {
     console.log("[TranscribeAudio] Language:", language, "->", languageName);
 
     // Build system prompt with strict ASR requirements
-    const systemPrompt = `You are a professional speech-to-text transcription engine. Transcribe audio EXACTLY as spoken.
+    const systemPrompt = `You are a speech-to-text engine. Your ONLY output is a single raw JSON object. No markdown, no explanations, no greetings, no code fences.
 
-## CRITICAL RULES - ABSOLUTE REQUIREMENTS:
+RULES:
+1. LANGUAGE: Detect language ONCE. Use ONLY that language for entire transcription.${language !== 'auto' ? ` Expected: ${languageName}.` : ''}
+2. FIDELITY: Transcribe EXACTLY what is spoken. Include fillers (uh, um, né, tipo). Include stutters. NEVER paraphrase.
+3. NAMES: "Jason" = "Jason" (NEVER "json"). Use common spelling for proper nouns.
+4. UNCLEAR: Use [inaudible] for genuinely unclear audio. NEVER guess. NEVER fill silence with text.
+5. CONFIDENCE: Score each word 0.0-1.0. Below 0.7 = use [inaudible].
+6. TIMESTAMPS: Sequential, non-overlapping, max ${maxDuration}s, 2 decimal places.
+7. FORBIDDEN in transcription field: json, null, undefined, true, false, {, }, [, ], repeated commas/punctuation.
 
-### 1. LANGUAGE LOCK
-- Detect the spoken language ONCE at the start
-- Use ONLY that language for the ENTIRE transcription
-- NEVER mix languages or switch mid-transcription
-- For "${language !== 'auto' ? languageName : 'unknown'}" audio: transcribe in that language only
+OUTPUT FORMAT - Return ONLY this JSON object, nothing else before or after:
+{"transcription":"exact transcription here","words":[{"word":"Hello","start":0.00,"end":0.35,"confidence":0.98}],"language":"${language !== 'auto' ? language : 'pt'}"}
 
-### 2. EXACT TRANSCRIPTION
-- Write EXACTLY what you hear - every word, every sound
-- Include filler words: "uh", "um", "né", "tipo", "like", "you know"
-- Include stutters and repetitions: "I-I think", "ele ele disse"
-- Include false starts: "I went— I mean, I walked"
-- NEVER summarize, paraphrase, or "clean up" speech
-- NEVER add words that weren't spoken
-- NEVER remove words that were spoken
+If NO SPEECH detected: {"transcription":"","words":[],"language":"${language}"}`;
 
-### 3. PROPER NOUNS
-- Transcribe names EXACTLY as heard
-- "Jason" stays "Jason" (never "json")
-- "Michael" stays "Michael" (never "mikal")
-- Prioritize literal spelling over phonetic interpretation
-- When uncertain, use most common spelling
-
-### 4. UNCLEAR AUDIO
-- Mark genuinely inaudible sections as: [inaudible]
-- Do NOT guess or fill in unclear words
-- Better to omit than invent
-- NEVER use placeholder punctuation like ", , ," or "..."
-
-### 5. CONFIDENCE SCORES
-- Provide confidence (0.0-1.0) for EACH word
-- High (0.9+): clearly heard
-- Medium (0.7-0.9): mostly clear
-- Low (<0.7): uncertain - mark as [inaudible] instead of guessing
-
-### 6. FORBIDDEN OUTPUT
-- NEVER output: json, null, undefined, true, false
-- NEVER output programming syntax or JSON keys as words
-- NEVER output standalone punctuation as words
-- NEVER output timestamps as transcription text
-- NEVER invent text to fill silence
-
-### 7. TIMESTAMP REQUIREMENTS
-- Every word gets start/end times in seconds
-- Timestamps must be sequential (no overlap)
-- word[n+1].start >= word[n].end
-- Maximum timestamp: ${maxDuration} seconds
-- Precision: 2 decimal places
-
-## OUTPUT FORMAT (valid JSON only, no markdown):
-{
-  "transcription": "exact word-for-word transcription",
-  "words": [
-    {"word": "Hello", "start": 0.00, "end": 0.35, "confidence": 0.98},
-    {"word": "world", "start": 0.40, "end": 0.72, "confidence": 0.95}
-  ],
-  "language": "pt" // ISO 639-1 code of detected/specified language
-}
-
-If NO SPEECH is detected, return exactly:
-{"transcription": "", "words": [], "language": "${language}"}`;
-
-    const userPrompt = `Transcribe this audio EXACTLY as spoken. Return ONLY valid JSON.
-${language !== 'auto' ? `\nIMPORTANT: This audio is in ${languageName}. Transcribe ONLY in ${languageName}.` : ''}
-Audio duration: approximately ${maxDuration} seconds.`;
+    const userPrompt = `Transcribe this audio. Output ONLY the raw JSON object, no text before or after it.${language !== 'auto' ? ` Language: ${languageName}.` : ''} Duration: ~${maxDuration}s.`;
 
     const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
