@@ -13,13 +13,13 @@ export interface CaptionSegment {
 export interface CaptionRenderInput {
   duration: number;
   position: CaptionPosition;
-  primaryColorHex: string; // e.g. "#FFFFFF"
+  primaryColorHex: string;
   highlightColorHex?: string;
   hookText?: string | null;
   segments: CaptionSegment[];
 }
 
-export type CaptionStrategy = "A_drawtext" | "B_drawtext_safe" | "C_overlay_images" | "C_overlay_fallback";
+export type CaptionStrategy = "A_drawtext" | "B_drawtext_safe" | "C_overlay_images" | "C_overlay_fallback" | "no_captions";
 
 export interface CaptionRenderResult {
   usedStrategy: CaptionStrategy;
@@ -29,7 +29,6 @@ export interface CaptionRenderResult {
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
 const stripInvalidChars = (s: string) => {
-  // Remove BOM and most control chars (keep \n)
   return s
     .replace(/\uFEFF/g, "")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
@@ -49,14 +48,12 @@ export const normalizeCaptionSegments = (
     const start = clamp(Number(seg.start) || 0, 0, duration);
     const end = clamp(Number(seg.end) || 0, 0, duration);
 
-    // Ensure non-empty window
     const minLen = 0.08;
     if (end - start < minLen) continue;
 
     safe.push({ text: rawText, start, end });
   }
 
-  // Sort and fix overlaps (soft)
   safe.sort((a, b) => a.start - b.start);
   const fixed: CaptionSegment[] = [];
   for (const seg of safe) {
@@ -78,10 +75,7 @@ export const normalizeCaptionSegments = (
   return fixed;
 };
 
-// FFmpeg drawtext escaping: keep it conservative for WASM.
 export const escapeDrawtextText = (text: string) => {
-  // Important: do NOT use shell-escaping (e.g. '\\'') — FFmpeg parses filter args, not a shell.
-  // Reference-ish: escape \, :, ', %, and newlines.
   return stripInvalidChars(text)
     .replace(/\\/g, "\\\\")
     .replace(/'/g, "\\'")
@@ -103,13 +97,30 @@ const hexNoHash = (hex: string, fallback: string) => {
   return fallback;
 };
 
-const ensureFontInFS = async (ffmpeg: FFmpeg) => {
+/** Load font into FFmpeg FS. Returns true if successful. */
+const ensureFontInFS = async (ffmpeg: FFmpeg): Promise<boolean> => {
   try {
-    // If it already exists, writeFile will overwrite, but that's fine.
     const data = await fetchFile(captionFontUrl);
+    if (!data || data.byteLength === 0) {
+      console.warn("[Captions] Font data is empty");
+      return false;
+    }
     await ffmpeg.writeFile("caption-font.ttf", data);
+    // Verify the file was written by reading its size
+    try {
+      const check = await ffmpeg.readFile("caption-font.ttf");
+      if (!check || (check as Uint8Array).byteLength === 0) {
+        console.warn("[Captions] Font file verification failed");
+        return false;
+      }
+    } catch {
+      console.warn("[Captions] Font file read-back failed");
+      return false;
+    }
+    return true;
   } catch (e) {
-    console.warn("[Captions] Failed to load bundled font into FFmpeg FS; drawtext may fallback.", e);
+    console.warn("[Captions] Failed to load font into FFmpeg FS:", e);
+    return false;
   }
 };
 
@@ -122,7 +133,6 @@ const buildDrawtextFilters = (input: CaptionRenderInput, mode: "normal" | "safe"
 
   const filters: string[] = [];
 
-  // Hook (0-1.2s)
   if (input.hookText) {
     const t = escapeDrawtextText(input.hookText.toUpperCase());
     if (t) {
@@ -135,7 +145,6 @@ const buildDrawtextFilters = (input: CaptionRenderInput, mode: "normal" | "safe"
   for (const seg of input.segments) {
     let t = seg.text;
     if (mode === "safe") {
-      // reduce chance of parser issues
       t = t.replace(/[\[\]"<>]/g, "");
     }
 
@@ -180,7 +189,6 @@ const renderOverlayPng = async (
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  // stroke (shadow-ish)
   ctx.lineWidth = 12;
   ctx.strokeStyle = "rgba(0,0,0,0.85)";
   ctx.fillStyle = primaryColor;
@@ -194,7 +202,6 @@ const renderOverlayPng = async (
     offsetY += fontSize * 1.2;
   }
 
-  // Small highlight bar (optional, deterministic)
   if (highlightColor) {
     ctx.fillStyle = highlightColor;
     ctx.globalAlpha = 0.22;
@@ -219,7 +226,7 @@ const wrapText = (ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
     }
   }
   if (line) lines.push(line);
-  return lines.slice(0, 4); // keep bounded
+  return lines.slice(0, 4);
 };
 
 const tryExec = async (ffmpeg: FFmpeg, args: string[]) => {
@@ -228,15 +235,38 @@ const tryExec = async (ffmpeg: FFmpeg, args: string[]) => {
   return exitCode;
 };
 
+/**
+ * Merge/group segments when there are too many for Strategy C (WASM memory limit).
+ * Groups adjacent segments to reduce overlay count.
+ */
+const mergeSegmentsForOverlay = (segments: CaptionSegment[], maxCount: number): CaptionSegment[] => {
+  if (segments.length <= maxCount) return segments;
+
+  const merged: CaptionSegment[] = [];
+  const groupSize = Math.ceil(segments.length / maxCount);
+
+  for (let i = 0; i < segments.length; i += groupSize) {
+    const group = segments.slice(i, i + groupSize);
+    const text = group.map(s => s.text).join(" ");
+    merged.push({
+      text,
+      start: group[0].start,
+      end: group[group.length - 1].end,
+    });
+  }
+
+  return merged;
+};
+
 export const renderCaptionsWithFallback = async (params: {
   ffmpeg: FFmpeg;
   inputFile: string;
   outputFile: string;
   startTime: number;
   duration: number;
-  baseVideoFilter: string; // crop/scale/etc
-  audioMapArgs: string[]; // e.g. ['-c:a','aac',...]
-  videoEncodeArgs: string[]; // e.g. ['-c:v','libx264','-pix_fmt','yuv420p',...]
+  baseVideoFilter: string;
+  audioMapArgs: string[];
+  videoEncodeArgs: string[];
   captions: CaptionRenderInput;
   captionsRequired: boolean;
 }): Promise<CaptionRenderResult> => {
@@ -244,14 +274,9 @@ export const renderCaptionsWithFallback = async (params: {
   const normalized = normalizeCaptionSegments(params.captions.segments, duration);
   const hadAnyCaptions = Boolean(params.captions.hookText) || normalized.length > 0;
 
-  // ASR-only mode: No fake captions ever
-  // If no real transcription, segments will be empty
   const hookText = stripInvalidChars(params.captions.hookText || "");
   const segments = normalized;
 
-  // CRITICAL: If captionsRequired but no segments, this means ASR found no speech
-  // We do NOT generate fake "LEGENDAS ATIVAS" text - that violates ASR integrity
-  // Instead, we render without captions and log the situation
   if (params.captionsRequired && segments.length === 0 && !hookText) {
     console.warn("[Captions] Captions required but no ASR transcription available - encoding without captions");
   }
@@ -259,10 +284,11 @@ export const renderCaptionsWithFallback = async (params: {
   const captionInput: CaptionRenderInput = {
     ...params.captions,
     hookText: hookText || null,
-    segments: segments, // Use only real ASR segments, never fake ones
+    segments: segments,
   };
 
-  await ensureFontInFS(ffmpeg);
+  // Check font availability FIRST - determines if drawtext strategies are possible
+  const fontLoaded = await ensureFontInFS(ffmpeg);
 
   const common = [
     "-ss",
@@ -275,52 +301,64 @@ export const renderCaptionsWithFallback = async (params: {
     "-1",
   ];
 
-  // Strategy A: drawtext, standard
-  try {
-    const draw = buildDrawtextFilters(captionInput, "normal");
-    if (params.captionsRequired && !draw) throw new Error("No caption filters built");
+  // Audio-safe args: use explicit mapping with optional audio stream
+  // This prevents exitCode=1 when video has no audio track
+  const audioSafeArgs = [
+    "-map", "0:v",
+    "-map", "0:a?",
+    ...params.videoEncodeArgs,
+    ...params.audioMapArgs,
+    "-shortest",
+  ];
 
-    const vf = draw ? `${params.baseVideoFilter},${draw}` : params.baseVideoFilter;
-    const args = [
-      ...common,
-      "-vf",
-      vf,
-      ...params.videoEncodeArgs,
-      ...params.audioMapArgs,
-      "-y",
-      outputFile,
-    ];
+  // Strategy A: drawtext, standard (only if font loaded)
+  if (fontLoaded) {
+    try {
+      const draw = buildDrawtextFilters(captionInput, "normal");
+      if (params.captionsRequired && !draw) throw new Error("No caption filters built");
 
-    console.log("[Captions] Trying strategy A_drawtext");
-    const exitCode = await tryExec(ffmpeg, args);
-    if (exitCode === 0) return { usedStrategy: "A_drawtext", hadAnyCaptions };
-    throw new Error(`exitCode=${exitCode}`);
-  } catch (e) {
-    console.warn("[Captions] Strategy A failed:", e);
-  }
+      const vf = draw ? `${params.baseVideoFilter},${draw}` : params.baseVideoFilter;
+      const args = [
+        ...common,
+        "-vf",
+        vf,
+        ...audioSafeArgs,
+        "-y",
+        outputFile,
+      ];
 
-  // Strategy B: drawtext, extra-safe escaping and reduced charset
-  try {
-    const draw = buildDrawtextFilters(captionInput, "safe");
-    if (params.captionsRequired && !draw) throw new Error("No caption filters built");
-    const vf = draw ? `${params.baseVideoFilter},${draw}` : params.baseVideoFilter;
+      console.log("[Captions] Trying strategy A_drawtext");
+      const exitCode = await tryExec(ffmpeg, args);
+      if (exitCode === 0) return { usedStrategy: "A_drawtext", hadAnyCaptions };
+      throw new Error(`exitCode=${exitCode}`);
+    } catch (e) {
+      console.warn("[Captions] Strategy A failed:", e);
+    }
 
-    const args = [
-      ...common,
-      "-vf",
-      vf,
-      ...params.videoEncodeArgs,
-      ...params.audioMapArgs,
-      "-y",
-      outputFile,
-    ];
+    // Strategy B: drawtext, extra-safe escaping and reduced charset
+    try {
+      const draw = buildDrawtextFilters(captionInput, "safe");
+      if (params.captionsRequired && !draw) throw new Error("No caption filters built");
+      const vf = draw ? `${params.baseVideoFilter},${draw}` : params.baseVideoFilter;
 
-    console.log("[Captions] Trying strategy B_drawtext_safe");
-    const exitCode = await tryExec(ffmpeg, args);
-    if (exitCode === 0) return { usedStrategy: "B_drawtext_safe", hadAnyCaptions };
-    throw new Error(`exitCode=${exitCode}`);
-  } catch (e) {
-    console.warn("[Captions] Strategy B failed:", e);
+      const args = [
+        ...common,
+        "-vf",
+        vf,
+        ...audioSafeArgs,
+        "-y",
+        outputFile,
+      ];
+
+      console.log("[Captions] Trying strategy B_drawtext_safe");
+      const exitCode = await tryExec(ffmpeg, args);
+      if (exitCode === 0) return { usedStrategy: "B_drawtext_safe", hadAnyCaptions };
+      throw new Error(`exitCode=${exitCode}`);
+    } catch (e) {
+      console.warn("[Captions] Strategy B failed:", e);
+    }
+  } else {
+    console.warn("[Captions] Font not available, skipping drawtext strategies A/B → going directly to C");
   }
 
   // Strategy C: overlay images (no drawtext). This is the "never fail" path.
@@ -341,25 +379,39 @@ export const renderCaptionsWithFallback = async (params: {
       await ffmpeg.writeFile("ov_hook.png", png);
     }
 
+    // Limit segments to MAX_OVERLAYS to prevent WASM OOM
+    const MAX_OVERLAYS = 15;
+    const overlaySegments = mergeSegmentsForOverlay(captionInput.segments, MAX_OVERLAYS - (captionInput.hookText ? 1 : 0));
+
     // Segment overlays
-    for (let i = 0; i < captionInput.segments.length; i++) {
-      const seg = captionInput.segments[i];
+    for (let i = 0; i < overlaySegments.length; i++) {
+      const seg = overlaySegments[i];
       overlays.push({ file: `ov_${i}.png`, start: seg.start, end: seg.end });
       const png = await renderOverlayPng(seg.text, captionInput.position, primary, highlight);
       await ffmpeg.writeFile(`ov_${i}.png`, png);
     }
 
-    // REMOVED: No fake fallback overlays
-    // ASR integrity: if no transcription, no captions
-    // This is expected behavior - silent clips have no captions
+    if (overlays.length === 0) {
+      // No overlays to render - encode without captions
+      console.log("[Captions] No overlays to render, encoding without captions");
+      const args = [
+        ...common,
+        "-vf",
+        params.baseVideoFilter,
+        ...audioSafeArgs,
+        "-y",
+        outputFile,
+      ];
+      const exitCode = await tryExec(ffmpeg, args);
+      if (exitCode === 0) return { usedStrategy: "no_captions", hadAnyCaptions: false };
+      throw new Error(`exitCode=${exitCode}`);
+    }
 
     const inputs: string[] = [];
     for (const ov of overlays) {
       inputs.push("-i", ov.file);
     }
 
-    // Build filter_complex
-    // [0:v]base[v0]; [v0][1:v]overlay=0:0:enable='between(t,...)'[v1]; ...
     const chains: string[] = [];
     chains.push(`[0:v]${params.baseVideoFilter}[v0]`);
     let last = "v0";
@@ -382,11 +434,11 @@ export const renderCaptionsWithFallback = async (params: {
       filterComplex,
       "-map",
       `[${last}]`,
-      // audio (if present)
       "-map",
       "0:a?",
       ...params.videoEncodeArgs,
       ...params.audioMapArgs,
+      "-shortest",
       "-y",
       outputFile,
     ];
@@ -399,10 +451,24 @@ export const renderCaptionsWithFallback = async (params: {
     console.warn("[Captions] Strategy C failed:", e);
   }
 
-  // REMOVED: Last-resort fake overlay
-  // ASR integrity: we never generate fake "LEGENDAS ATIVAS" text
-  // If no speech was detected, the video has no captions - this is correct behavior
+  // Last resort: encode without captions rather than crashing
+  if (!params.captionsRequired) {
+    try {
+      console.warn("[Captions] All strategies failed, encoding without captions");
+      const args = [
+        ...common,
+        "-vf",
+        params.baseVideoFilter,
+        ...audioSafeArgs,
+        "-y",
+        outputFile,
+      ];
+      const exitCode = await tryExec(ffmpeg, args);
+      if (exitCode === 0) return { usedStrategy: "no_captions", hadAnyCaptions: false };
+    } catch (e2) {
+      console.warn("[Captions] Even no-caption encode failed:", e2);
+    }
+  }
 
-  // If captions aren't required, allow completion without them.
   throw new Error("Caption rendering failed for all strategies");
 };

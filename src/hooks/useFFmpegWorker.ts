@@ -198,6 +198,12 @@ export function useFFmpegWorker() {
       // IMPORTANT: Extract WAV audio via FFmpeg (WASM) before calling ASR.
       // Sending MP4 bytes to ASR is unreliable and breaks transcription.
       const clipDuration = Math.max(0.1, clipEnd - clipStart);
+
+      // Skip ASR for very short clips - timestamps will be invalid
+      if (clipDuration < 0.5) {
+        console.warn('[FFmpegWorker] Clip too short for ASR:', clipDuration, 's');
+        return null;
+      }
       const wavBlob = await extractWavPreview({
         inputFile: inputFileName,
         startTime: clipStart,
@@ -491,6 +497,7 @@ export function useFFmpegWorker() {
         } as const;
 
         const videoEncodeArgs = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23'];
+        // Audio encode args: -c:a aac only applies if stream exists (mapped with 0:a?)
         const audioEncodeArgs = ['-c:a', 'aac', '-b:a', '128k'];
 
         const runEncode = async () => {
@@ -513,15 +520,18 @@ export function useFFmpegWorker() {
               console.log('[Captions] Non-mandatory captions used strategy:', usedStrategy);
               return;
             } catch (e) {
-              console.warn('[Captions] Non-mandatory caption render failed; encoding without captions.', e);
+            console.warn('[Captions] Non-mandatory caption render failed; encoding without captions.', e);
               const exitCode = await ff.exec([
                 '-ss', startTime.toFixed(2),
                 '-i', 'input.mp4',
                 '-t', clipDuration.toFixed(2),
                 '-vf', baseVideoFilter,
                 '-map_metadata', '-1',
+                '-map', '0:v',
+                '-map', '0:a?',
                 ...videoEncodeArgs,
                 ...audioEncodeArgs,
+                '-shortest',
                 '-y',
                 outputName
               ]);
