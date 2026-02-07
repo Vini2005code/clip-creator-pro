@@ -2,3 +2,6 @@ project_id = "dtdnklqrkmfhthceunvw"
 
 [functions.smart-caption]
 verify_jwt = false
+
+[functions.transcribe-audio]
+verify_jwt = false

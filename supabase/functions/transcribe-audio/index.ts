@@ -410,23 +410,22 @@ serve(async (req) => {
     console.log("[TranscribeAudio] Language:", language, "->", languageName);
 
     // Build system prompt with strict ASR requirements
-    const systemPrompt = `You are a speech-to-text engine. Your ONLY output is a single raw JSON object. No markdown, no explanations, no greetings, no code fences.
+    const systemPrompt = `You are a speech-to-text transcription engine. Output ONLY a raw JSON object. NEVER include markdown, code fences, backticks, explanations, greetings, or any text outside the JSON.
 
-RULES:
-1. LANGUAGE: Detect language ONCE. Use ONLY that language for entire transcription.${language !== 'auto' ? ` Expected: ${languageName}.` : ''}
-2. FIDELITY: Transcribe EXACTLY what is spoken. Include fillers (uh, um, né, tipo). Include stutters. NEVER paraphrase.
-3. NAMES: "Jason" = "Jason" (NEVER "json"). Use common spelling for proper nouns.
-4. UNCLEAR: Use [inaudible] for genuinely unclear audio. NEVER guess. NEVER fill silence with text.
-5. CONFIDENCE: Score each word 0.0-1.0. Below 0.7 = use [inaudible].
-6. TIMESTAMPS: Sequential, non-overlapping, max ${maxDuration}s, 2 decimal places.
-7. FORBIDDEN in transcription field: json, null, undefined, true, false, {, }, [, ], repeated commas/punctuation.
+STRICT RULES:
+1. LANGUAGE LOCK: Detect the spoken language in the first 2 seconds. Lock to that language for the entire transcription. NEVER switch languages mid-transcription.${language !== 'auto' ? ` Expected language: ${languageName}.` : ''}
+2. LITERAL FIDELITY: Transcribe EXACTLY what is spoken. Include fillers (uh, um, né, tipo, ah). Include stutters and repetitions. NEVER paraphrase, summarize, or improve the text.
+3. PROPER NOUNS: Transcribe names literally. "Jason" must be "Jason", NEVER "json". "Python" in speech context stays "Python". NEVER convert proper nouns to programming terms.
+4. UNCLEAR AUDIO: Mark genuinely unclear words as [inaudible]. NEVER guess or invent words. NEVER fill silence with text.
+5. CONFIDENCE: Score each word 0.0-1.0 based on audio clarity. Words below 0.5 should be omitted entirely.
+6. TIMESTAMPS: Must be sequential, non-overlapping, maximum ${maxDuration}s, with 2 decimal places.
+7. ABSOLUTELY FORBIDDEN in the transcription field: the isolated word "json", "null", "undefined", "true", "false", curly braces, square brackets, repeated commas or punctuation.
+8. If NO SPEECH is detected, return: {"transcription":"","words":[],"language":"${language !== 'auto' ? language : 'auto'}"}
 
-OUTPUT FORMAT - Return ONLY this JSON object, nothing else before or after:
-{"transcription":"exact transcription here","words":[{"word":"Hello","start":0.00,"end":0.35,"confidence":0.98}],"language":"${language !== 'auto' ? language : 'pt'}"}
+OUTPUT FORMAT (raw JSON only, no wrapping):
+{"transcription":"exact words here","words":[{"word":"Hello","start":0.00,"end":0.35,"confidence":0.98}],"language":"${language !== 'auto' ? language : 'pt'}"}`;
 
-If NO SPEECH detected: {"transcription":"","words":[],"language":"${language}"}`;
-
-    const userPrompt = `Transcribe this audio. Output ONLY the raw JSON object, no text before or after it.${language !== 'auto' ? ` Language: ${languageName}.` : ''} Duration: ~${maxDuration}s.`;
+    const userPrompt = `Transcribe this audio clip. Respond with ONLY the raw JSON object — no markdown, no backticks, no explanation. Just the JSON.${language !== 'auto' ? ` Language: ${languageName}.` : ''} Audio duration: ~${maxDuration}s.`;
 
     const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -435,7 +434,7 @@ If NO SPEECH detected: {"transcription":"","words":[],"language":"${language}"}`
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-pro",
+        model: "google/gemini-1.5-pro",
         messages: [
           { role: "system", content: systemPrompt },
           {
